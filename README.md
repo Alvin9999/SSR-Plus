@@ -33,7 +33,7 @@ wget -O ssr-plus.sh https://raw.githubusercontent.com/Alvin9999/SSR-Plus/main/ss
 chmod +x ssr-plus.sh
 bash ssr-plus.sh
 
-```bash
+---------
 
 ## 📖 功能菜单
 
