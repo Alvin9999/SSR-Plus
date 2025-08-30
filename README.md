@@ -5,7 +5,7 @@
 
 ---
 
-## ✅ 支持系统
+# ✅ 支持系统
 
 **Debian 系列**
 - Debian 9 (stretch)  
@@ -26,7 +26,7 @@
 
 ---
 
-## 📥 安装/更新脚本
+# 📥 安装/更新脚本
 
 ```bash
 wget -O ssr-plus.sh https://raw.githubusercontent.com/Alvin9999/SSR-Plus/main/ssr-plus.sh
@@ -34,7 +34,7 @@ chmod +x ssr-plus.sh
 bash ssr-plus.sh
 ```
 
-## 📖 功能菜单
+# 📖 功能菜单
 
 ==============================
 🚀 SSR-Plus 管理脚本 v1.1.2 🚀
@@ -55,7 +55,7 @@ bash ssr-plus.sh
 SSR 当前状态: 已启动 / 已停止 / 未安装
 ==============================
 
-## 🔑 示例配置展示
+# 🔑 示例配置展示
 
 ### 当前 SSR 配置
 | 参数       | 值                |
@@ -72,7 +72,7 @@ SSR 链接:
 ssr://MjAzLjAmF1dGhfY2hhaW5fYTpj...（示例）
 
 
-## ⚡ 系统加速（BBR + TCP Fast Open）
+# ⚡ 系统加速（BBR + TCP Fast Open）
 
 ### 功能说明
 - 🚀 一键启用 TCP Fast Open  
@@ -92,7 +92,7 @@ sysctl net.ipv4.tcp_congestion_control
 sysctl net.core.default_qdisc
 ```
 
-## 🧭 使用说明
+# 🧭 使用说明
 
 ### 基础操作流程
 1. **首次运行** → 选择 `1) 安装 SSR`，按提示填写端口、密码、加密方式、协议、混淆。  
@@ -110,14 +110,14 @@ sysctl net.core.default_qdisc
 
 ---
 
-### 清理卸载
+# 清理卸载
 | 功能项 | 操作说明 |
 |--------|----------|
 | 🗑 卸载服务 | `7) 卸载 SSR`（会停止并移除容器与镜像，删除配置文件） |
 
 ---
 
-### 网络加速
+# 网络加速
 | 功能项 | 操作说明 |
 |--------|----------|
 | ⚡ 启用加速 | `8) 启用系统加速 (BBR + TFO)` |
@@ -128,7 +128,7 @@ sysctl net.core.default_qdisc
 - 📦 脚本默认在 **Docker 容器** 中运行 SSR  
 - ⚙️ 配置文件路径： /etc/shadowsocks-r/config.json
  
-## 🛠 常见问题（FAQ）
+# 🛠 常见问题（FAQ）
 
 | ❓ 问题 | 💡 解决方法 |
 |---------|-------------|
