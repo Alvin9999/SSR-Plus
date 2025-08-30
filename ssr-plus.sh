@@ -1,6 +1,6 @@
 #!/bin/bash
 # 🚀 SSR-Plus Docker 管理脚本
-# 支持 Debian/Ubuntu
+# 支持高版本系统 Debian/Ubuntu
 # 版本号: v1.1.2
 
 stty erase ^H   # 让退格键在终端里正常工作
