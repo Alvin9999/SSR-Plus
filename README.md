@@ -36,7 +36,6 @@ bash ssr-plus.sh
 
 ## 📖 功能菜单
 
-```text
 ==============================
 🚀 SSR-Plus 管理脚本 v1.1.2 🚀
 ==============================
@@ -86,11 +85,12 @@ ssr://MjAzLjAmF1dGhfY2hhaW5fYTpj...（示例）
 | 🔧 内核版本检查 | < 4.9 可能无法启用 BBR |
 
 ### 验证方法
-启用后可通过以下命令验证是否生效：  
+启用后可通过以下命令验证是否生效： 
+
 ```bash
 sysctl net.ipv4.tcp_congestion_control
 sysctl net.core.default_qdisc
-
+```
 
 ## 🧭 使用说明
 
