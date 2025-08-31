@@ -345,7 +345,7 @@ optimize_system() {
   local qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
 
   if [[ "$cc" == "bbr" && "$qdisc" == "fq" ]]; then
-    echo -e "${GREEN}${INDENT}✅ 系统加速已启用 (BBR + TFO)${NC}"
+    echo -e "${GREEN}${INDENT}✅ 系统加速已启用 (BBR + TCP Fast Open)${NC}"
   else
     echo -e "${YELLOW}${INDENT}正在启用 TCP Fast Open + BBR...${NC}"
     {
@@ -381,7 +381,7 @@ echo -e "${GREEN}${INDENT}4) 启动 SSR${NC}"
 echo -e "${GREEN}${INDENT}5) 停止 SSR${NC}"
 echo -e "${GREEN}${INDENT}6) 重启 SSR${NC}"
 echo -e "${YELLOW}${INDENT}7) 卸载 SSR${NC}"
-echo -e "${BLUE}${INDENT}8) 启用系统加速 (BBR + TFO)${NC}"
+echo -e "${BLUE}${INDENT}8) 启用系统加速 (BBR + TCP Fast Open)${NC}"
 echo -e "${RED}${INDENT}9) 退出${NC}"
 echo -e "${CYAN}${INDENT}==============================${NC}"
 echo -e "${INDENT}系统加速状态: ${BBR_STATUS}"
