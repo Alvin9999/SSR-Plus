@@ -11,7 +11,35 @@ CONFIG_PATH="/etc/shadowsocks-r/config.json"
 
 # ========== 样式 ==========
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; CYAN='\e[36m'; NC='\e[0m'
-INDENT=" "; VERSION="v1.1.8"
+INDENT=" "
+VERSION="v1.1.8"
+
+# ========== 工具函数 ==========
+script_path() {
+  # 尽量拿到脚本真实路径
+  local p
+  p="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "$0")"
+  # 如果拿到的是 bash 或不存在，则退回到当前目录的同名文件
+  if [[ ! -f "$p" || "$(basename "$p")" = "bash" ]]; then
+    if [[ -f "./ssr-plus.sh" ]]; then
+      p="./ssr-plus.sh"
+    else
+      echo ""
+      return 1
+    fi
+  fi
+  echo "$p"
+}
+
+fetch_to() {
+  # 用 curl 或 wget 下载到指定文件
+  local url="$1" out="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$out"
+  else
+    wget -qO "$out" "$url"
+  fi
+}
 
 # ========== 系统检测 ==========
 detect_os(){ if [ -f /etc/os-release ]; then . /etc/os-release; OS=$ID; else OS=$(uname -s); fi; }
@@ -51,7 +79,10 @@ install_docker(){
     opensuse*|sles)
       zypper install -y docker docker-runc
       ;;
-    *) echo -e "${RED}${INDENT}⚠️ 未知系统，请手动安装 Docker${NC}"; exit 1;;
+    *)
+      echo -e "${RED}${INDENT}⚠️ 未知系统，请手动安装 Docker${NC}"
+      exit 1
+      ;;
   esac
   command -v docker >/dev/null 2>&1 || { echo -e "${RED}${INDENT}❌ Docker 未安装成功${NC}"; exit 1; }
   systemctl enable docker >/dev/null 2>&1; systemctl start docker
@@ -207,11 +238,8 @@ run_container_with_boot(){
 CFG="/etc/shadowsocks-r/config.json"
 # 等待配置文件写入
 for i in {1..60}; do [ -f "$CFG" ] && break; sleep 1; done
-# 额外等网络就绪
 sleep 2
-# 启动一次
 pgrep -f server.py >/dev/null 2>&1 || python /usr/local/shadowsocks/server.py -c "$CFG" -d start
-# 看门狗：SSR 掉了再拉起
 while sleep 5; do
   pgrep -f server.py >/dev/null 2>&1 || python /usr/local/shadowsocks/server.py -c "$CFG" -d start
 done
@@ -228,7 +256,6 @@ install_ssr(){
   choose_method; choose_protocol; choose_obfs
 
   install_docker; ensure_docker_running || { echo -e "${RED}${INDENT}Docker 未运行，安装中止${NC}"; return; }
-
   docker pull $DOCKER_IMAGE
   docker stop $CONTAINER_NAME >/dev/null 2>&1; docker rm $CONTAINER_NAME >/dev/null 2>&1
 
@@ -268,7 +295,6 @@ change_config(){
 
   PORT=${NEW_PORT:-$PORT}
   set_config
-  # 让看门狗拉起或立即手动拉起
   docker exec -d $CONTAINER_NAME python /usr/local/shadowsocks/server.py -c $CONFIG_PATH -d stop >/dev/null 2>&1
   sleep 1
   start_ssr_and_wait
@@ -276,21 +302,24 @@ change_config(){
   show_config
 }
 
-start_ssr(){ ensure_docker_running || { echo -e "${RED}${INDENT}Docker 未运行${NC}"; return; }
+start_ssr(){
+  ensure_docker_running || { echo -e "${RED}${INDENT}Docker 未运行${NC}"; return; }
   docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
   [ "$(docker inspect -f '{{.State.Running}}' $CONTAINER_NAME 2>/dev/null)" = "true" ] || docker start "$CONTAINER_NAME" >/dev/null 2>&1
   docker exec "$CONTAINER_NAME" test -f "$CONFIG_PATH" || { echo -e "${YELLOW}${INDENT}未发现配置文件${NC}"; return; }
   start_ssr_and_wait
 }
 
-stop_ssr(){ ensure_docker_running || { echo -e "${RED}${INDENT}Docker 未运行${NC}"; return; }
+stop_ssr(){
+  ensure_docker_running || { echo -e "${RED}${INDENT}Docker 未运行${NC}"; return; }
   docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
   [ "$(docker inspect -f '{{.State.Running}}' $CONTAINER_NAME 2>/dev/null)" = "true" ] && docker exec -d "$CONTAINER_NAME" python /usr/local/shadowsocks/server.py -c "$CONFIG_PATH" -d stop
   sleep 1
   docker exec "$CONTAINER_NAME" pgrep -f "server.py" >/dev/null 2>&1 && echo -e "${RED}${INDENT}❌ SSR 停止失败${NC}" || echo -e "${YELLOW}${INDENT}🛑 SSR 已停止${NC}"
 }
 
-restart_ssr(){ ensure_docker_running || { echo -e "${RED}${INDENT}Docker 未运行${NC}"; return; }
+restart_ssr(){
+  ensure_docker_running || { echo -e "${RED}${INDENT}Docker 未运行${NC}"; return; }
   docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
   [ "$(docker inspect -f '{{.State.Running}}' $CONTAINER_NAME 2>/dev/null)" = "true" ] || docker start "$CONTAINER_NAME" >/dev/null 2>&1
   docker exec "$CONTAINER_NAME" test -f "$CONFIG_PATH" || { echo -e "${YELLOW}${INDENT}未发现配置文件${NC}"; return; }
@@ -298,7 +327,8 @@ restart_ssr(){ ensure_docker_running || { echo -e "${RED}${INDENT}Docker 未运�
   sleep 1; start_ssr_and_wait; echo -e "${GREEN}${INDENT}🔄 SSR 已重启${NC}"
 }
 
-uninstall_ssr(){ echo -e "${RED}${INDENT}卸载 SSR...${NC}"
+uninstall_ssr(){
+  echo -e "${RED}${INDENT}卸载 SSR...${NC}"
   if command -v docker >/dev/null 2>&1; then docker stop $CONTAINER_NAME >/dev/null 2>&1; docker rm $CONTAINER_NAME >/dev/null 2>&1; docker rmi $DOCKER_IMAGE >/dev/null 2>&1; fi
   echo -e "${RED}${INDENT}✅ SSR 已卸载完成${NC}"
 }
@@ -327,8 +357,41 @@ auto_heal_ssr(){
   start_ssr_and_wait
 }
 
+# ========== 脚本自更新 ==========
+update_script(){
+  echo -e "${BLUE}${INDENT}更新脚本至最新版...${NC}"
+  local url="https://raw.githubusercontent.com/Alvin9999/SSR-Plus/main/ssr-plus.sh"
+  local tmp="$(mktemp)"
+  if ! fetch_to "$url" "$tmp"; then
+    echo -e "${RED}${INDENT}❌ 下载失败，请检查网络${NC}"; rm -f "$tmp"; return 1
+  fi
+  if ! grep -q "SSR-Plus Docker 管理脚本" "$tmp"; then
+    echo -e "${RED}${INDENT}❌ 下载内容异常，已取消更新${NC}"; rm -f "$tmp"; return 1
+  fi
+
+  local new_ver="$(grep -Eo 'VERSION=\"v[^\"]+\"' "$tmp" | head -n1 | cut -d'"' -f2)"
+  [[ -z "$new_ver" ]] && new_ver="未知版本"
+
+  local self; self="$(script_path)"
+  if [[ -z "$self" ]]; then
+    echo -e "${RED}${INDENT}❌ 无法定位当前脚本路径，请在脚本所在目录执行更新${NC}"
+    rm -f "$tmp"; return 1
+  fi
+
+  cp -f "$self" "$self.bak-$(date +%F-%H%M%S)" 2>/dev/null
+  chmod +x "$tmp" && mv -f "$tmp" "$self"
+
+  echo -e "${GREEN}${INDENT}✅ 更新完成 → ${new_ver}${NC}"
+  echo -e "${INDENT}正在重新加载新版本..."
+  exec bash "$self"
+}
+
 # ========== 主菜单 ==========
-check_bbr; ensure_docker_running >/dev/null 2>&1; check_ssr_status; auto_heal_ssr; check_ssr_status
+check_bbr
+ensure_docker_running >/dev/null 2>&1
+check_ssr_status
+auto_heal_ssr
+check_ssr_status
 
 echo -e "${CYAN}${INDENT}=============================="
 echo -e "${INDENT}🚀 SSR-Plus 管理脚本 ${VERSION} 🚀"
@@ -342,13 +405,14 @@ echo -e "${GREEN}${INDENT}5) 停止 SSR${NC}"
 echo -e "${GREEN}${INDENT}6) 重启 SSR${NC}"
 echo -e "${YELLOW}${INDENT}7) 卸载 SSR${NC}"
 echo -e "${BLUE}${INDENT}8) 启用系统加速 (BBR + TFO)${NC}"
-echo -e "${RED}${INDENT}9) 退出${NC}"
+echo -e "${BLUE}${INDENT}9) 更新脚本至最新版${NC}"
+echo -e "${RED}${INDENT}10) 退出${NC}"
 echo -e "${CYAN}${INDENT}==============================${NC}"
 echo -e "${INDENT}系统加速状态: ${BBR_STATUS}"
 echo -e "${INDENT}SSR 当前状态: ${SSR_STATUS}"
 echo -e "${CYAN}${INDENT}==============================${NC}"
 
-read -p "${INDENT}请输入选项 [1-9]: " choice
+read -p "${INDENT}请输入选项 [1-10]: " choice
 case $choice in
   1) install_docker; install_ssr ;;
   2) change_config ;;
@@ -358,6 +422,7 @@ case $choice in
   6) restart_ssr ;;
   7) uninstall_ssr ;;
   8) optimize_system ;;
-  9) exit 0 ;;
+  9) update_script ;;
+  10) exit 0 ;;
   *) echo -e "${RED}${INDENT}无效选项${NC}";;
 esac
