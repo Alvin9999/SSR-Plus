@@ -42,7 +42,7 @@ curl -fsSL -o ssr-plus.sh https://raw.githubusercontent.com/Alvin9999/SSR-Plus/m
 
 ```text
 ==============================
-🚀 SSR-Plus 管理脚本 v1.1.2 🚀
+🚀 SSR-Plus 管理脚本 v1.1.9 🚀
 ==============================
 
 1) 安装 SSR
@@ -53,7 +53,8 @@ curl -fsSL -o ssr-plus.sh https://raw.githubusercontent.com/Alvin9999/SSR-Plus/m
 6) 重启 SSR
 7) 卸载 SSR
 8) 启用系统加速 (BBR + TFO)
-9) 退出
+9) 检查并更新脚本
+10) 退出
 
 系统加速状态: 已启用 / 未启用
 SSR 当前状态: 已启动 / 已停止 / 未安装
@@ -153,6 +154,7 @@ sysctl net.core.default_qdisc
 
 | 版本号 | 日期      | 更新内容 |
 |--------|-----------|----------|
+| v1.1.3-9 | 2025-08   | - 优化服务器重启程序无法正常加载问题<br>- 增加脚本更新选项 |
 | v1.1.2 | 2025-08   | - 优化菜单显示，增加状态检测（已安装 / 已启动 / 已停止）<br>- 增加 BBR 检测与启用功能<br>- 修复部分系统下 Docker 安装失败的问题 |
 | v1.1.1 | 2025-08   | - 修复部分系统下 SSR 启动失败的问题<br>- 增强 Docker 安装脚本兼容性 |
 | v1.1.0 | 2025-08   | - 支持 Debian 9-13、Ubuntu 18.04-25.04<br>- 增加配置导出功能 |
