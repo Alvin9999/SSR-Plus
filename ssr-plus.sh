@@ -1,7 +1,7 @@
 #!/bin/bash
 # 🚀 SSR-Plus Docker 管理脚本
 # 支持 Debian/Ubuntu/CentOS/RHEL/Rocky/AlmaLinux/Fedora/openSUSE
-# 版本号: v1.1.4
+# 版本号: v1.1.5
 
 stty erase ^H   # 让退格键在终端里正常工作
 
@@ -18,7 +18,7 @@ CYAN='\e[36m'
 NC='\e[0m' # No Color
 
 INDENT=" "   # 缩进 1 格
-VERSION="v1.1.4"
+VERSION="v1.1.5"
 
 # ========== 系统检测 ==========
 detect_os() {
@@ -49,7 +49,7 @@ install_docker() {
       ;;
     centos|rhel)
       yum install -y yum-utils device-mapper-persistent-data lvm2 || {
-        echo -e "${RED}${INDENT}❌ yum-utils 安装失败，请先清理缓存后再运行:${NC}"
+        echo -e "${RED}${INDENT}❌ yum-utils 安装失败，请先清理缓存:${NC}"
         echo -e "${YELLOW}${INDENT}执行: yum clean all && rm -rf /var/cache/yum${NC}"
         exit 1
       }
@@ -288,6 +288,27 @@ show_config() {
   generate_ssr_link
 }
 
+# ========== 启动等待 & 重试 ==========
+start_ssr_and_wait() {
+  docker exec -d "$CONTAINER_NAME" python /usr/local/shadowsocks/server.py -c "$CONFIG_PATH" -d start
+  for i in {1..5}; do
+    sleep 1
+    if docker exec "$CONTAINER_NAME" pgrep -f "server.py" >/dev/null 2>&1; then
+      echo -e "${GREEN}${INDENT}✅ SSR 已启动${NC}"
+      return 0
+    fi
+  done
+  docker exec -d "$CONTAINER_NAME" python /usr/local/shadowsocks/server.py -c "$CONFIG_PATH" -d start
+  sleep 1
+  if docker exec "$CONTAINER_NAME" pgrep -f "server.py" >/dev/null 2>&1; then
+    echo -e "${GREEN}${INDENT}✅ SSR 已启动${NC}"
+    return 0
+  fi
+  echo -e "${RED}${INDENT}❌ SSR 启动失败，最近日志如下：${NC}"
+  docker logs --tail 80 "$CONTAINER_NAME" 2>&1 | sed "s/^/${INDENT}/"
+  return 1
+}
+
 # ========== 功能 ==========
 install_ssr() {
   echo -e "${BLUE}${INDENT}安装 SSR...${NC}"
@@ -306,16 +327,18 @@ install_ssr() {
   docker stop $CONTAINER_NAME >/dev/null 2>&1
   docker rm $CONTAINER_NAME >/dev/null 2>&1
 
-  # 自启动 + 保活：容器启动时尝试启动 SSR；初次因未写配置可能失败，忽略错误并保持容器存活
+  # 自启 + 保活 + 健康检查
   docker run -dit --name $CONTAINER_NAME \
     --restart unless-stopped \
     -p ${PORT}:${PORT} \
+    --health-cmd "python -c 'import socket,sys; s=socket.socket(); s.settimeout(2); s.connect((\"127.0.0.1\",${PORT})); s.close()' || exit 1" \
+    --health-interval 10s --health-retries 3 --health-timeout 3s --health-start-period 5s \
     $DOCKER_IMAGE \
     bash -lc "python /usr/local/shadowsocks/server.py -c $CONFIG_PATH -d start || true; tail -f /dev/null"
 
   sleep 1
   set_config
-  docker exec -d $CONTAINER_NAME python /usr/local/shadowsocks/server.py -c $CONFIG_PATH -d start
+  start_ssr_and_wait
   echo -e "${GREEN}${INDENT}✅ SSR 安装完成${NC}"
   show_config
 }
@@ -356,6 +379,8 @@ change_config() {
     docker run -dit --name $CONTAINER_NAME \
       --restart unless-stopped \
       -p ${NEW_PORT}:${NEW_PORT} \
+      --health-cmd "python -c 'import socket,sys; s=socket.socket(); s.settimeout(2); s.connect((\"127.0.0.1\",${NEW_PORT})); s.close()' || exit 1" \
+      --health-interval 10s --health-retries 3 --health-timeout 3s --health-start-period 5s \
       $DOCKER_IMAGE \
       bash -lc "python /usr/local/shadowsocks/server.py -c $CONFIG_PATH -d start || true; tail -f /dev/null"
     sleep 1
@@ -363,8 +388,9 @@ change_config() {
 
   PORT=${NEW_PORT:-$PORT}
   set_config
-  docker exec -d $CONTAINER_NAME python /usr/local/shadowsocks/server.py -c $CONFIG_PATH -d restart
+  docker exec -d $CONTAINER_NAME python /usr/local/shadowsocks/server.py -c $CONFIG_PATH -d stop
   sleep 1
+  start_ssr_and_wait
   echo -e "${GREEN}${INDENT}✅ 配置修改完成${NC}"
   show_config
 }
@@ -391,14 +417,7 @@ start_ssr() {
     return
   fi
 
-  docker exec -d "$CONTAINER_NAME" python /usr/local/shadowsocks/server.py -c "$CONFIG_PATH" -d start
-  sleep 1
-  if docker exec "$CONTAINER_NAME" pgrep -f "server.py" >/dev/null 2>&1; then
-    echo -e "${GREEN}${INDENT}✅ SSR 已启动${NC}"
-  else
-    echo -e "${RED}${INDENT}❌ SSR 启动失败，最近日志如下：${NC}"
-    docker logs --tail 80 "$CONTAINER_NAME" 2>&1 | sed "s/^/${INDENT}/"
-  fi
+  start_ssr_and_wait
 }
 
 stop_ssr() {
@@ -444,14 +463,10 @@ restart_ssr() {
     return
   fi
 
-  docker exec -d "$CONTAINER_NAME" python /usr/local/shadowsocks/server.py -c "$CONFIG_PATH" -d restart
+  docker exec -d "$CONTAINER_NAME" python /usr/local/shadowsocks/server.py -c "$CONFIG_PATH" -d stop
   sleep 1
-  if docker exec "$CONTAINER_NAME" pgrep -f "server.py" >/dev/null 2>&1; then
-    echo -e "${GREEN}${INDENT}🔄 SSR 已重启${NC}"
-  else
-    echo -e "${RED}${INDENT}❌ SSR 重启失败，最近日志如下：${NC}"
-    docker logs --tail 80 "$CONTAINER_NAME" 2>&1 | sed "s/^/${INDENT}/"
-  fi
+  start_ssr_and_wait
+  echo -e "${GREEN}${INDENT}🔄 SSR 已重启${NC}"
 }
 
 uninstall_ssr() {
@@ -504,8 +519,7 @@ auto_heal_ssr() {
     return
   fi
   echo -e "${YELLOW}${INDENT}检测到 SSR 未运行，尝试自动拉起...${NC}"
-  docker exec -d "$CONTAINER_NAME" python /usr/local/shadowsocks/server.py -c "$CONFIG_PATH" -d start
-  sleep 1
+  start_ssr_and_wait
 }
 
 # ========== 主菜单 ==========
