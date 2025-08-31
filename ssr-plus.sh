@@ -397,12 +397,10 @@ update_script() {
 
   if [[ "$lv" = "$rv" && "$SSRPLUS_FORCE" != "1" ]]; then
     echo -e "${GREEN}${INDENT}✅ 已是最新版：${local_ver}${NC}"
-    echo -e "${INDENT}如需强制覆盖，请： export SSRPLUS_FORCE=1  后再执行更新。"
     rm -f "$tmp"; return 0
   fi
   if [[ "$max" = "$lv" && "$lv" != "$rv" && "$SSRPLUS_FORCE" != "1" ]]; then
     echo -e "${YELLOW}${INDENT}ℹ️ 本地版本 (${local_ver}) 新于远端 (${remote_ver})，跳过更新${NC}"
-    echo -e "${INDENT}如需覆盖远端版本，可： export SSRPLUS_FORCE=1  后再执行更新。"
     rm -f "$tmp"; return 0
   fi
 
