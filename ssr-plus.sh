@@ -1,7 +1,7 @@
 #!/bin/bash
 # 🚀 SSR-Plus Docker 管理脚本
 # 支持 Debian/Ubuntu/CentOS/RHEL/Rocky/AlmaLinux/Fedora/openSUSE
-# 版本号: v1.1.7
+# 版本号: v1.1.8
 
 stty erase ^H   # 让退格键在终端里正常工作
 
@@ -11,7 +11,7 @@ CONFIG_PATH="/etc/shadowsocks-r/config.json"
 
 # ========== 样式 ==========
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; CYAN='\e[36m'; NC='\e[0m'
-INDENT=" "; VERSION="v1.1.7"
+INDENT=" "; VERSION="v1.1.8"
 
 # ========== 系统检测 ==========
 detect_os(){ if [ -f /etc/os-release ]; then . /etc/os-release; OS=$ID; else OS=$(uname -s); fi; }
