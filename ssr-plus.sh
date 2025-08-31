@@ -292,7 +292,7 @@ change_config(){
   NEW_PORT=${NEW_PORT:-$PORT}; PASSWORD=${NEW_PASSWORD:-$PASSWORD}
 
   if [ "$NEW_PORT" != "$PORT" ] && [ -n "$NEW_PORT" ]; then
-    echo -e "${YELLOW}${INDENT}端口改变，重新创建容器...${NC}"
+    echo -e "${YELLOW}${INDENT}配置改变，重新创建容器...${NC}"
     docker stop $CONTAINER_NAME >/dev/null 2>&1; docker rm $CONTAINER_NAME >/dev/null 2>&1
     run_container_with_boot "${NEW_PORT}"
     sleep 1
