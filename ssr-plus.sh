@@ -292,7 +292,7 @@ change_config(){
   NEW_PORT=${NEW_PORT:-$PORT}; PASSWORD=${NEW_PASSWORD:-$PASSWORD}
 
   if [ "$NEW_PORT" != "$PORT" ] && [ -n "$NEW_PORT" ]; then
-    echo -e "${YELLOW}${INDENT}配置改变，重新创建容器...${NC}"
+    echo -e "${YELLOW}${INDENT}配置改变，重新创建容器，请稍等...${NC}"
     docker stop $CONTAINER_NAME >/dev/null 2>&1; docker rm $CONTAINER_NAME >/dev/null 2>&1
     run_container_with_boot "${NEW_PORT}"
     sleep 1
@@ -333,7 +333,7 @@ restart_ssr(){
 }
 
 uninstall_ssr(){
-  echo -e "${RED}${INDENT}卸载 SSR...${NC}"
+  echo -e "${RED}${INDENT}卸载 SSR，正在卸载，请稍等...${NC}"
   if command -v docker >/dev/null 2>&1; then docker stop $CONTAINER_NAME >/dev/null 2>&1; docker rm $CONTAINER_NAME >/dev/null 2>&1; docker rmi $DOCKER_IMAGE >/dev/null 2>&1; fi
   echo -e "${RED}${INDENT}✅ SSR 已卸载完成${NC}"
 }
