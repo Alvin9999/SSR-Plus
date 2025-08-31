@@ -1,7 +1,7 @@
 #!/bin/bash
 # 🚀 SSR-Plus Docker 管理脚本
-# 支持高版本系统 Debian/Ubuntu
-# 版本号: v1.1.2
+# 支持 Debian/Ubuntu/CentOS/RHEL/Rocky/AlmaLinux/Fedora/openSUSE
+# 版本号: v1.1.1
 
 stty erase ^H   # 让退格键在终端里正常工作
 
@@ -18,7 +18,7 @@ CYAN='\e[36m'
 NC='\e[0m' # No Color
 
 INDENT=" "   # 缩进 1 格
-VERSION="v1.1.2"
+VERSION="v1.1.1"
 
 # ========== 系统检测 ==========
 detect_os() {
@@ -87,7 +87,6 @@ install_docker() {
   systemctl enable docker
   systemctl start docker
 }
-
 # ========== SSR 状态检测 ==========
 check_ssr_status() {
   if ! command -v docker >/dev/null 2>&1; then
@@ -288,6 +287,9 @@ change_config() {
   local cfg=$(docker exec -i $CONTAINER_NAME cat $CONFIG_PATH 2>/dev/null)
   PORT=$(echo "$cfg" | grep '"server_port"' | awk -F ':' '{print $2}' | tr -d ' ,')
   PASSWORD=$(echo "$cfg" | grep '"password"' | awk -F '"' '{print $4}')
+  METHOD=$(echo "$cfg" | grep '"method"' | awk -F '"' '{print $4}')
+  PROTOCOL=$(echo "$cfg" | grep '"protocol"' | awk -F '"' '{print $4}')
+  OBFS=$(echo "$cfg" | grep '"obfs"' | awk -F '"' '{print $4}')
 
   read -p "${INDENT}新端口 (回车保留: ${PORT}): " NEW_PORT
   read -p "${INDENT}新密码 (回车保留: ${PASSWORD}): " NEW_PASSWORD
@@ -382,4 +384,19 @@ echo -e "${BLUE}${INDENT}8) 启用系统加速 (BBR + TFO)${NC}"
 echo -e "${RED}${INDENT}9) 退出${NC}"
 echo -e "${CYAN}${INDENT}==============================${NC}"
 echo -e "${INDENT}系统加速状态: ${BBR_STATUS}"
-echo -e
+echo -e "${INDENT}SSR 当前状态: ${SSR_STATUS}"
+echo -e "${CYAN}${INDENT}==============================${NC}"
+
+read -p "${INDENT}请输入选项 [1-9]: " choice
+case $choice in
+  1) install_docker; install_ssr ;;
+  2) change_config ;;
+  3) show_config ;;
+  4) start_ssr ;;
+  5) stop_ssr ;;
+  6) restart_ssr ;;
+  7) uninstall_ssr ;;
+  8) optimize_system ;;
+  9) exit 0 ;;
+  *) echo -e "${RED}${INDENT}无效选项${NC}";;
+esac
