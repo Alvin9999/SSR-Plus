@@ -29,9 +29,12 @@
 ## 📥 安装/更新脚本
 
 ```bash
-wget -O ssr-plus.sh https://raw.githubusercontent.com/Alvin9999/SSR-Plus/main/ssr-plus.sh
-chmod +x ssr-plus.sh
-bash ssr-plus.sh
+wget -O ssr-plus.sh https://raw.githubusercontent.com/Alvin9999/SSR-Plus/main/ssr-plus.sh && chmod +x ssr-plus.sh
+```
+或者
+
+```bash
+curl -fsSL -o ssr-plus.sh https://raw.githubusercontent.com/Alvin9999/SSR-Plus/main/ssr-plus.sh && chmod +x ssr-plus.sh
 ```
 
 ## 📖 功能菜单
