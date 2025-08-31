@@ -372,6 +372,7 @@ check_ssr_status
 
 echo -e "${CYAN}${INDENT}=============================="
 echo -e "${INDENT}🚀 SSR-Plus 管理脚本 ${VERSION} 🚀"
+echo -e "${INDENT}脚本更新地址:https://github.com/Alvin9999/SSR-Plus"
 echo -e "${INDENT}==============================${NC}"
 echo -e "${GREEN}${INDENT}1) 安装 SSR${NC}"
 echo -e "${GREEN}${INDENT}2) 修改配置${NC}"
