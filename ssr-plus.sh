@@ -1,7 +1,7 @@
 #!/bin/bash
 # 🚀 SSR-Plus Docker 管理脚本
 # 支持 Debian/Ubuntu/CentOS/RHEL/Rocky/AlmaLinux/Fedora/openSUSE
-# 版本号: v1.1.3
+# 版本号: v1.1.4
 
 stty erase ^H   # 让退格键在终端里正常工作
 
@@ -18,7 +18,7 @@ CYAN='\e[36m'
 NC='\e[0m' # No Color
 
 INDENT=" "   # 缩进 1 格
-VERSION="v1.1.3"
+VERSION="v1.1.4"
 
 # ========== 系统检测 ==========
 detect_os() {
@@ -84,8 +84,20 @@ install_docker() {
     exit 1
   fi
 
-  systemctl enable docker
+  systemctl enable docker >/dev/null 2>&1
   systemctl start docker
+}
+
+# ========== 确保 Docker 正在运行 ==========
+ensure_docker_running() {
+  if ! command -v docker >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    systemctl start docker >/dev/null 2>&1
+    sleep 1
+  fi
+  docker info >/dev/null 2>&1
 }
 
 # ========== SSR 状态检测 ==========
@@ -95,18 +107,21 @@ check_ssr_status() {
     return
   fi
 
+  if ! docker info >/dev/null 2>&1; then
+    SSR_STATUS="${RED}Docker 未运行${NC}"
+    return
+  fi
+
   if ! docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$"; then
     SSR_STATUS="${RED}未安装${NC}"
     return
   fi
 
-  # 容器存在
   if [ "$(docker inspect -f '{{.State.Running}}' $CONTAINER_NAME 2>/dev/null)" != "true" ]; then
     SSR_STATUS="${YELLOW}容器已停止${NC}"
     return
   fi
 
-  # 容器运行中，检查 SSR 进程
   if docker exec "$CONTAINER_NAME" pgrep -f "server.py" >/dev/null 2>&1; then
     SSR_STATUS="${GREEN}已启动${NC}"
   else
@@ -207,7 +222,7 @@ choose_obfs() {
 
 # ========== 配置 ==========
 set_config() {
-  docker exec -i $CONTAINER_NAME bash -c "mkdir -p /etc/shadowsocks-r && cat > $CONFIG_PATH" <<EOF
+  docker exec -i $CONTAINER_NAME bash -lc "mkdir -p /etc/shadowsocks-r && cat > $CONFIG_PATH" <<EOF
 {
   "server":"0.0.0.0",
   "server_ipv6":"::",
@@ -238,6 +253,11 @@ generate_ssr_link() {
 }
 
 show_config() {
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    echo -e "${RED}${INDENT}Docker 未运行或不可用，无法读取容器配置${NC}"
+    return
+  fi
+
   if ! docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$"; then
     echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"
     return
@@ -280,21 +300,30 @@ install_ssr() {
   choose_obfs
 
   install_docker
+  ensure_docker_running || { echo -e "${RED}${INDENT}Docker 未运行，安装中止${NC}"; return; }
 
   docker pull $DOCKER_IMAGE
   docker stop $CONTAINER_NAME >/dev/null 2>&1
   docker rm $CONTAINER_NAME >/dev/null 2>&1
-  docker run -dit --name $CONTAINER_NAME --restart unless-stopped -p ${PORT}:${PORT} $DOCKER_IMAGE
 
-  set_config
-  # 确保容器已就绪
+  # 自启动 + 保活：容器启动时尝试启动 SSR；初次因未写配置可能失败，忽略错误并保持容器存活
+  docker run -dit --name $CONTAINER_NAME \
+    --restart unless-stopped \
+    -p ${PORT}:${PORT} \
+    $DOCKER_IMAGE \
+    bash -lc "python /usr/local/shadowsocks/server.py -c $CONFIG_PATH -d start || true; tail -f /dev/null"
+
   sleep 1
+  set_config
   docker exec -d $CONTAINER_NAME python /usr/local/shadowsocks/server.py -c $CONFIG_PATH -d start
   echo -e "${GREEN}${INDENT}✅ SSR 安装完成${NC}"
   show_config
 }
 
 change_config() {
+  if ! ensure_docker_running; then
+    echo -e "${RED}${INDENT}Docker 未运行${NC}"; return
+  fi
   if ! docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$"; then
     echo -e "${RED}${INDENT}未检测到 SSR 容器，请先安装${NC}"
     return
@@ -324,7 +353,11 @@ change_config() {
     echo -e "${YELLOW}${INDENT}端口改变，重新创建容器...${NC}"
     docker stop $CONTAINER_NAME >/dev/null 2>&1
     docker rm $CONTAINER_NAME >/dev/null 2>&1
-    docker run -dit --name $CONTAINER_NAME --restart unless-stopped -p ${NEW_PORT}:${NEW_PORT} $DOCKER_IMAGE
+    docker run -dit --name $CONTAINER_NAME \
+      --restart unless-stopped \
+      -p ${NEW_PORT}:${NEW_PORT} \
+      $DOCKER_IMAGE \
+      bash -lc "python /usr/local/shadowsocks/server.py -c $CONFIG_PATH -d start || true; tail -f /dev/null"
     sleep 1
   fi
 
@@ -337,22 +370,22 @@ change_config() {
 }
 
 start_ssr() {
-  # 容器存在？
+  if ! ensure_docker_running; then
+    echo -e "${RED}${INDENT}Docker 未运行${NC}"; return
+  fi
   if ! docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$"; then
     echo -e "${RED}${INDENT}未检测到 SSR 容器，请先执行『安装 SSR』${NC}"
     return
   fi
 
-  # 容器未运行则先启动容器
   if [ "$(docker inspect -f '{{.State.Running}}' $CONTAINER_NAME 2>/dev/null)" != "true" ]; then
-    if ! docker start "$CONTAINER_NAME" >/dev/null 2>&1; then
+    docker start "$CONTAINER_NAME" >/dev/null 2>&1 || {
       echo -e "${RED}${INDENT}容器无法启动，请查看日志： docker logs ${CONTAINER_NAME}${NC}"
       return
-    fi
+    }
     sleep 1
   fi
 
-  # 配置文件存在？
   if ! docker exec "$CONTAINER_NAME" test -f "$CONFIG_PATH"; then
     echo -e "${YELLOW}${INDENT}未发现配置文件，请先『安装 SSR』或『修改配置』写入参数${NC}"
     return
@@ -369,6 +402,9 @@ start_ssr() {
 }
 
 stop_ssr() {
+  if ! ensure_docker_running; then
+    echo -e "${RED}${INDENT}Docker 未运行${NC}"; return
+  fi
   if ! docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$"; then
     echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"
     return
@@ -387,6 +423,9 @@ stop_ssr() {
 }
 
 restart_ssr() {
+  if ! ensure_docker_running; then
+    echo -e "${RED}${INDENT}Docker 未运行${NC}"; return
+  fi
   if ! docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$"; then
     echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"
     return
@@ -417,10 +456,11 @@ restart_ssr() {
 
 uninstall_ssr() {
   echo -e "${RED}${INDENT}卸载 SSR...${NC}"
-  docker stop $CONTAINER_NAME >/dev/null 2>&1
-  docker rm $CONTAINER_NAME >/dev/null 2>&1
-  docker rmi $DOCKER_IMAGE >/dev/null 2>&1
-  # 仅删除容器内配置文件；宿主机无持久化路径则无需额外处理
+  if command -v docker >/dev/null 2>&1; then
+    docker stop $CONTAINER_NAME >/dev/null 2>&1
+    docker rm $CONTAINER_NAME >/dev/null 2>&1
+    docker rmi $DOCKER_IMAGE >/dev/null 2>&1
+  fi
   echo -e "${RED}${INDENT}✅ SSR 已卸载完成${NC}"
 }
 
@@ -452,8 +492,27 @@ optimize_system() {
   fi
 }
 
+# ========== 自愈：容器在但 SSR 未运行时自动拉起 ==========
+auto_heal_ssr() {
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    return
+  fi
+  if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$"; then
+    return
+  fi
+  if docker exec "$CONTAINER_NAME" pgrep -f "server.py" >/dev/null 2>&1; then
+    return
+  fi
+  echo -e "${YELLOW}${INDENT}检测到 SSR 未运行，尝试自动拉起...${NC}"
+  docker exec -d "$CONTAINER_NAME" python /usr/local/shadowsocks/server.py -c "$CONFIG_PATH" -d start
+  sleep 1
+}
+
 # ========== 主菜单 ==========
 check_bbr
+ensure_docker_running >/dev/null 2>&1
+check_ssr_status
+auto_heal_ssr
 check_ssr_status
 
 echo -e "${CYAN}${INDENT}=============================="
