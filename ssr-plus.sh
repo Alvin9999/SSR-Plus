@@ -1,7 +1,7 @@
 #!/bin/bash
 # 🚀 SSR-Plus Docker 管理脚本
 # 支持 Debian/Ubuntu/CentOS/RHEL/Rocky/AlmaLinux/Fedora/openSUSE
-# 版本号: v1.1.8-2
+# 版本号: v1.1.9
 
 stty erase ^H   # 让退格键在终端里正常工作
 
@@ -12,32 +12,30 @@ CONFIG_PATH="/etc/shadowsocks-r/config.json"
 # ========== 样式 ==========
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; CYAN='\e[36m'; NC='\e[0m'
 INDENT=" "
-VERSION="v1.1.8-2"
+VERSION="v1.1.9"
 
-# ========== 工具函数 ==========
+# ========== 更新源（可配镜像/IPv4/IPv6/强制覆盖）==========
+RAW_URL_DEFAULT="https://raw.githubusercontent.com/Alvin9999/SSR-Plus/main/ssr-plus.sh"
+
+# 获取当前脚本的真实路径（便于原地覆盖）
 script_path() {
-  # 尽量拿到脚本真实路径
   local p
   p="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "$0")"
-  # 如果拿到的是 bash 或不存在，则退回到当前目录的同名文件
   if [[ ! -f "$p" || "$(basename "$p")" = "bash" ]]; then
-    if [[ -f "./ssr-plus.sh" ]]; then
-      p="./ssr-plus.sh"
-    else
-      echo ""
-      return 1
-    fi
+    [[ -f "./ssr-plus.sh" ]] && p="./ssr-plus.sh" || { echo ""; return 1; }
   fi
   echo "$p"
 }
 
+# 用 curl 或 wget 下载到指定文件（支持 SSRPLUS_IPMODE=4/6、SSRPLUS_MIRROR）
 fetch_to() {
-  # 用 curl 或 wget 下载到指定文件
-  local url="$1" out="$2"
+  local url="$1" out="$2" opts=()
+  [[ "$SSRPLUS_IPMODE" = "4" ]] && opts+=(-4)
+  [[ "$SSRPLUS_IPMODE" = "6" ]] && opts+=(-6)
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url" -o "$out"
+    curl -fsSL "${opts[@]}" "$url" -o "$out"
   else
-    wget -qO "$out" "$url"
+    wget -q "${opts[@]}" -O "$out" "$url"
   fi
 }
 
@@ -85,7 +83,8 @@ install_docker(){
       ;;
   esac
   command -v docker >/dev/null 2>&1 || { echo -e "${RED}${INDENT}❌ Docker 未安装成功${NC}"; exit 1; }
-  systemctl enable docker >/dev/null 2>&1; systemctl start docker
+  systemctl enable docker >/dev/null 2>&1
+  systemctl start docker
 }
 
 # ========== 确保 Docker 运行 ==========
@@ -97,7 +96,11 @@ check_ssr_status(){
   docker info >/dev/null 2>&1 || { SSR_STATUS="${RED}Docker 未运行${NC}"; return; }
   docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$" || { SSR_STATUS="${RED}未安装${NC}"; return; }
   [ "$(docker inspect -f '{{.State.Running}}' $CONTAINER_NAME 2>/dev/null)" = "true" ] || { SSR_STATUS="${YELLOW}容器已停止${NC}"; return; }
-  if docker exec "$CONTAINER_NAME" pgrep -f "server.py" >/dev/null 2>&1; then SSR_STATUS="${GREEN}已启动${NC}"; else SSR_STATUS="${YELLOW}容器运行中 (SSR 进程未运行)${NC}"; fi
+  if docker exec "$CONTAINER_NAME" pgrep -f "server.py" >/dev/null 2>&1; then
+    SSR_STATUS="${GREEN}已启动${NC}"
+  else
+    SSR_STATUS="${YELLOW}容器运行中 (SSR 进程未运行)${NC}"
+  fi
 }
 
 # ========== BBR 检测 ==========
@@ -189,7 +192,9 @@ set_config(){
 EOF
 }
 
-generate_ssr_link(){ local ip=$(curl -s ifconfig.me); local pass_b64=$(echo -n "${PASSWORD}" | base64 -w0)
+generate_ssr_link(){
+  local ip=$(curl -s ifconfig.me)
+  local pass_b64=$(echo -n "${PASSWORD}" | base64 -w0)
   local raw="${ip}:${PORT}:${PROTOCOL}:${METHOD}:${OBFS}:${pass_b64}/"
   echo -e "\n${GREEN}${INDENT}SSR 链接:${NC}\n${INDENT}ssr://$(echo -n "$raw" | base64 -w0)\n"
 }
@@ -337,7 +342,8 @@ uninstall_ssr(){
 optimize_system(){
   echo -e "${BLUE}${INDENT}检查系统加速状态...${NC}"
   local cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null); local qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
-  if [[ "$cc" == "bbr" && "$qdisc" == "fq" ]]; then echo -e "${GREEN}${INDENT}✅ 系统加速已启用 (BBR + TFO)${NC}";
+  if [[ "$cc" == "bbr" && "$qdisc" == "fq" ]]; then
+    echo -e "${GREEN}${INDENT}✅ 系统加速已启用 (BBR + TFO)${NC}"
   else
     echo -e "${YELLOW}${INDENT}正在启用 TCP Fast Open + BBR...${NC}"
     { echo "net.ipv4.tcp_fastopen = 3"; echo "net.core.default_qdisc = fq"; echo "net.ipv4.tcp_congestion_control = bbr"; } >> /etc/sysctl.conf
@@ -357,20 +363,22 @@ auto_heal_ssr(){
   start_ssr_and_wait
 }
 
-# ========== 脚本自更新 ==========
-update_script(){
-  echo -e "${BLUE}${INDENT}更新脚本至最新版...${NC}"
-  local url="https://raw.githubusercontent.com/Alvin9999/SSR-Plus/main/ssr-plus.sh"
+# ========== 脚本自更新（含版本判断/镜像/强制） ==========
+update_script() {
+  echo -e "${BLUE}${INDENT}检查脚本更新...${NC}"
+  local raw="${RAW_URL_DEFAULT}"
+  [[ -n "$SSRPLUS_MIRROR" ]] && raw="${SSRPLUS_MIRROR}${RAW_URL_DEFAULT}"
+
   local tmp="$(mktemp)"
-  if ! fetch_to "$url" "$tmp"; then
-    echo -e "${RED}${INDENT}❌ 下载失败，请检查网络${NC}"; rm -f "$tmp"; return 1
+  if ! fetch_to "$raw" "$tmp"; then
+    echo -e "${RED}${INDENT}❌ 下载失败。${NC}"
+    echo -e "${YELLOW}${INDENT}可设置镜像： export SSRPLUS_MIRROR='https://ghproxy.com/'${NC}"
+    echo -e "${YELLOW}${INDENT}切换 IPv4/IPv6： export SSRPLUS_IPMODE=4  或  6${NC}"
+    rm -f "$tmp"; return 1
   fi
   if ! grep -q "SSR-Plus Docker 管理脚本" "$tmp"; then
     echo -e "${RED}${INDENT}❌ 下载内容异常，已取消更新${NC}"; rm -f "$tmp"; return 1
   fi
-
-  local new_ver="$(grep -Eo 'VERSION=\"v[^\"]+\"' "$tmp" | head -n1 | cut -d'"' -f2)"
-  [[ -z "$new_ver" ]] && new_ver="未知版本"
 
   local self; self="$(script_path)"
   if [[ -z "$self" ]]; then
@@ -378,10 +386,29 @@ update_script(){
     rm -f "$tmp"; return 1
   fi
 
+  local local_ver remote_ver
+  local_ver="$(grep -E 'VERSION="' "$self" 2>/dev/null | head -n1 | sed -E 's/.*VERSION="([^"]+)".*/\1/')"
+  remote_ver="$(grep -E 'VERSION="' "$tmp"  2>/dev/null | head -n1 | sed -E 's/.*VERSION="([^"]+)".*/\1/')"
+  [[ -z "$local_ver" ]] && local_ver="v0.0.0"
+  [[ -z "$remote_ver" ]] && { echo -e "${RED}${INDENT}❌ 未能解析远端版本号，已取消更新${NC}"; rm -f "$tmp"; return 1; }
+
+  local lv rv max; lv="${local_ver#v}"; rv="${remote_ver#v}"
+  max="$(printf '%s\n%s\n' "$lv" "$rv" | sort -V | tail -n1)"
+
+  if [[ "$lv" = "$rv" && "$SSRPLUS_FORCE" != "1" ]]; then
+    echo -e "${GREEN}${INDENT}✅ 已是最新版：${local_ver}${NC}"
+    echo -e "${INDENT}如需强制覆盖，请： export SSRPLUS_FORCE=1  后再执行更新。"
+    rm -f "$tmp"; return 0
+  fi
+  if [[ "$max" = "$lv" && "$lv" != "$rv" && "$SSRPLUS_FORCE" != "1" ]]; then
+    echo -e "${YELLOW}${INDENT}ℹ️ 本地版本 (${local_ver}) 新于远端 (${remote_ver})，跳过更新${NC}"
+    echo -e "${INDENT}如需覆盖远端版本，可： export SSRPLUS_FORCE=1  后再执行更新。"
+    rm -f "$tmp"; return 0
+  fi
+
   cp -f "$self" "$self.bak-$(date +%F-%H%M%S)" 2>/dev/null
   chmod +x "$tmp" && mv -f "$tmp" "$self"
-
-  echo -e "${GREEN}${INDENT}✅ 更新完成 → ${new_ver}${NC}"
+  echo -e "${GREEN}${INDENT}✅ 更新完成： ${local_ver} → ${remote_ver}${NC}"
   echo -e "${INDENT}正在重新加载新版本..."
   exec bash "$self"
 }
@@ -405,7 +432,7 @@ echo -e "${GREEN}${INDENT}5) 停止 SSR${NC}"
 echo -e "${GREEN}${INDENT}6) 重启 SSR${NC}"
 echo -e "${YELLOW}${INDENT}7) 卸载 SSR${NC}"
 echo -e "${BLUE}${INDENT}8) 启用系统加速 (BBR + TFO)${NC}"
-echo -e "${BLUE}${INDENT}9) 更新脚本至最新版${NC}"
+echo -e "${BLUE}${INDENT}9) 检查并更新脚本${NC}"
 echo -e "${RED}${INDENT}10) 退出${NC}"
 echo -e "${CYAN}${INDENT}==============================${NC}"
 echo -e "${INDENT}系统加速状态: ${BBR_STATUS}"
