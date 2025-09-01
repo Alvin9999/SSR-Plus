@@ -1,7 +1,7 @@
 #!/bin/bash
 # 🚀 SSR-Plus Docker 管理脚本
 # 支持 Debian/Ubuntu/CentOS/RHEL/Rocky/AlmaLinux/Fedora/openSUSE
-# 版本号: v1.2.0
+# 版本号: v1.2.1
 
 stty erase ^H   # 让退格键在终端里正常工作
 
@@ -12,7 +12,7 @@ CONFIG_PATH="/etc/shadowsocks-r/config.json"
 # ========== 样式 ==========
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; CYAN='\e[36m'; NC='\e[0m'
 INDENT=" "
-VERSION="v1.2.0"
+VERSION="v1.2.1"
 
 # ========== 更新源（可配镜像/IPv4/IPv6/强制覆盖）==========
 RAW_URL_DEFAULT="https://raw.githubusercontent.com/Alvin9999/SSR-Plus/main/ssr-plus.sh"
@@ -20,7 +20,7 @@ RAW_URL_DEFAULT="https://raw.githubusercontent.com/Alvin9999/SSR-Plus/main/ssr-p
 # ========== 小工具 ==========
 have_cmd(){ command -v "$1" >/dev/null 2>&1; }
 
-# 获取当前脚本的真实路径（便于原地覆盖）
+# 当前脚本真实路径
 script_path() {
   local p
   p="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "$0")"
@@ -30,7 +30,22 @@ script_path() {
   echo "$p"
 }
 
-# 用 curl 或 wget 下载到指定文件（支持 SSRPLUS_IPMODE=4/6、SSRPLUS_MIRROR）
+# 标准 base64（单行）
+enc_b64() {
+  if have_cmd openssl; then
+    printf '%s' "$1" | openssl enc -base64 -A
+  else
+    if base64 --help 2>/dev/null | grep -q -- '-w'; then
+      printf '%s' "$1" | base64 -w0
+    else
+      printf '%s' "$1" | base64 | tr -d '\n'
+    fi
+  fi
+}
+# URL-safe base64（SSR/SSR(R) 推荐：去掉 '='，替换 '+/'→'-_'）
+enc_b64url(){ enc_b64 "$1" | tr '+/' '-_' | tr -d '='; }
+
+# 下载工具（支持 SSRPLUS_IPMODE=4/6、SSRPLUS_MIRROR）
 fetch_to() {
   local url="$1" out="$2" opts=()
   [[ "$SSRPLUS_IPMODE" = "4" ]] && opts+=(-4)
@@ -113,23 +128,58 @@ check_bbr(){
   [[ "$cc" == "bbr" && "$qdisc" == "fq" ]] && BBR_STATUS="${GREEN}已启用 BBR${NC}" || BBR_STATUS="${RED}未启用 BBR${NC}"
 }
 
-# ========== 多 IP 收集 ==========
+# ========== 多 IP 收集（仅公网） ==========
 MAX_V6_TO_SHOW=5
-get_ipv4_list() {
-  if have_cmd ip; then
-    ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1
-  else
-    # 兜底：从 hostname -I 里筛 IPv4
-    hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/'
-  fi
+
+is_public_v4() {
+  # 排除内网/环回/链路本地/CGNAT
+  [[ "$1" =~ ^10\. ]] && return 1
+  [[ "$1" =~ ^127\. ]] && return 1
+  [[ "$1" =~ ^169\.254\. ]] && return 1
+  [[ "$1" =~ ^192\.168\. ]] && return 1
+  [[ "$1" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] && return 1
+  [[ "$1" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\. ]] && return 1
+  [[ "$1" = "0.0.0.0" ]] && return 1
+  return 0
 }
-get_ipv6_list() {
+
+get_ipv4_list() {
+  local ips=()
   if have_cmd ip; then
-    ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2}' | cut -d/ -f1
+    while IFS= read -r ip4; do
+      is_public_v4 "$ip4" && ips+=("$ip4")
+    done < <(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)
   else
-    # 兜底：从 hostname -I 里筛 IPv6（带冒号的）
-    hostname -I 2>/dev/null | tr ' ' '\n' | awk '/:/'
+    while IFS= read -r ip4; do
+      [[ "$ip4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && is_public_v4 "$ip4" && ips+=("$ip4")
+    done < <(hostname -I 2>/dev/null | tr ' ' '\n')
   fi
+  printf '%s\n' "${ips[@]}"
+}
+
+is_public_v6() {
+  local low="${1,,}"   # 转小写
+  [[ "$low" = "::1" ]] && return 1
+  [[ "$low" =~ ^fe80: ]] && return 1
+  [[ "$low" =~ ^fc ]] && return 1
+  [[ "$low" =~ ^fd ]] && return 1
+  # 2000::/3 近似判断：以 2xxx: 或 3xxx: 开头
+  [[ "$low" =~ ^[23][0-9a-f]*: ]] && return 0
+  return 1
+}
+
+get_ipv6_list() {
+  local ips=() cand
+  if have_cmd ip; then
+    while IFS= read -r cand; do
+      is_public_v6 "$cand" && ips+=("$cand")
+    done < <(ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2}' | cut -d/ -f1)
+  else
+    while IFS= read -r cand; do
+      [[ "$cand" == *:* ]] && is_public_v6 "$cand" && ips+=("$cand")
+    done < <(hostname -I 2>/dev/null | tr ' ' '\n')
+  fi
+  printf '%s\n' "${ips[@]}"
 }
 
 # ========== 选择项 ==========
@@ -214,40 +264,48 @@ set_config(){
 EOF
 }
 
-# ========== 链接与配置展示（多 IP） ==========
+# ========== 链接与配置展示（多 IP + URL-safe） ==========
 generate_ssr_link() {
-  local pass_b64=$(echo -n "${PASSWORD}" | base64 -w0)
+  # 组件编码
+  local pwd_b64 url_pwd_b64 obfsparam_b64 protoparam_b64 remarks_b64 group_b64
+  pwd_b64="$(enc_b64 "$PASSWORD")"               # 传统实现多为标准 base64
+  url_pwd_b64="$(enc_b64url "$PASSWORD")"        # 也有客户端更偏好 url-safe
+  obfsparam_b64="$(enc_b64url "")"
+  protoparam_b64="$(enc_b64url "")"
 
-  # 收集本机全部 IPv4 / IPv6
+  # 收集本机全部公网 IPv4 / IPv6
   local v4s=() v6s=()
   mapfile -t v4s < <(get_ipv4_list)
   mapfile -t v6s < <(get_ipv6_list)
 
   echo -e "\n${GREEN}${INDENT}SSR 链接（可任选其一导入客户端）：${NC}"
 
-  # 为每个 IPv4 生成标准 SSR 链接
+  # IPv4：生成两种（兼容性最好）：密码部分用标准 b64，整体用 url-safe b64
   if ((${#v4s[@]})); then
     for ip4 in "${v4s[@]}"; do
-      local raw="${ip4}:${PORT}:${PROTOCOL}:${METHOD}:${OBFS}:${pass_b64}/"
-      echo -e "${INDENT}- IPv4: ssr://$(echo -n "$raw" | base64 -w0)"
+      remarks_b64="$(enc_b64url "SSR-Plus:${ip4}:${PORT}")"
+      group_b64="$(enc_b64url "SSR-Plus")"
+      local raw_std="${ip4}:${PORT}:${PROTOCOL}:${METHOD}:${OBFS}:${pwd_b64}/?obfsparam=${obfsparam_b64}&protoparam=${protoparam_b64}&remarks=${remarks_b64}&group=${group_b64}"
+      echo -e "${INDENT}- IPv4: ssr://$(enc_b64url "$raw_std")"
     done
   else
-    echo -e "${INDENT}- IPv4: ${YELLOW}未检测到${NC}"
+    echo -e "${INDENT}- IPv4: ${YELLOW}未检测到公网 IPv4${NC}"
   fi
 
-  # IPv6 说明：多数 SSR 客户端对“IPv6 直接导入链接”兼容性不一，推荐在客户端“手动填写参数”或使用域名。
+  # IPv6：大多客户端也支持；若少数不识别，请“手动填参数或用域名”
   if ((${#v6s[@]})); then
     local n=0
-    echo -e "\n${YELLOW}${INDENT}提示：若以下 IPv6 无法通过链接导入，请在客户端手动填写：服务器=对应IPv6，端口=${PORT}，其余参数同上。${NC}"
+    echo -e "\n${YELLOW}${INDENT}提示：若以下 IPv6 链接导入失败，请在客户端手动填写服务器=该 IPv6、端口=${PORT}，其余参数同下。${NC}"
     for ip6 in "${v6s[@]}"; do
-      # 试验性生成（若客户端不支持，请手动填）
-      local raw="${ip6}:${PORT}:${PROTOCOL}:${METHOD}:${OBFS}:${pass_b64}/"
-      echo -e "${INDENT}- IPv6(试验): ssr://$(echo -n "$raw" | base64 -w0)    ${CYAN}# 若导入失败请手动填参数${NC}"
+      remarks_b64="$(enc_b64url "SSR-Plus:${ip6}:${PORT}")"
+      group_b64="$(enc_b64url "SSR-Plus")"
+      local raw_v6="${ip6}:${PORT}:${PROTOCOL}:${METHOD}:${OBFS}:${url_pwd_b64}/?obfsparam=${obfsparam_b64}&protoparam=${protoparam_b64}&remarks=${remarks_b64}&group=${group_b64}"
+      echo -e "${INDENT}- IPv6: ssr://$(enc_b64url "$raw_v6")"
       ((n++)); [[ $n -ge ${MAX_V6_TO_SHOW:-5} ]] && break
     done
     (( ${#v6s[@]} > n )) && echo -e "${INDENT}  …其余 IPv6 已省略（共 ${#v6s[@]} 条，展示 $n 条）"
   else
-    echo -e "${INDENT}- IPv6: ${YELLOW}未检测到${NC}"
+    echo -e "${INDENT}- IPv6: ${YELLOW}未检测到公网 IPv6${NC}"
   fi
 
   echo
@@ -267,7 +325,7 @@ show_config(){
   PROTOCOL=$(echo "$cfg" | grep '"protocol"' | awk -F '"' '{print $4}')
   OBFS=$(echo "$cfg" | grep '"obfs"' | awk -F '"' '{print $4}')
 
-  # 收集本机 IP
+  # 汇总公网 IP
   local v4_list v6_list
   v4_list=$(get_ipv4_list | paste -sd, -)
   v6_list=$(get_ipv6_list | paste -sd, -)
@@ -390,7 +448,7 @@ stop_ssr(){
 restart_ssr(){
   ensure_docker_running || { echo -e "${RED}${INDENT}Docker 未运行${NC}"; return; }
   docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
-  [ "$(docker inspect -f '{{.State.Running}}' $CONTAINER_NAME 2>/div/null)" = "true" ] || docker start "$CONTAINER_NAME" >/dev/null 2>&1
+  [ "$(docker inspect -f '{{.State.Running}}' $CONTAINER_NAME 2>/dev/null)" = "true" ] || docker start "$CONTAINER_NAME" >/dev/null 2>&1
   docker exec "$CONTAINER_NAME" test -f "$CONFIG_PATH" || { echo -e "${YELLOW}${INDENT}未发现配置文件${NC}"; return; }
   docker exec -d "$CONTAINER_NAME" python /usr/local/shadowsocks/server.py -c "$CONFIG_PATH" -d stop
   sleep 1; start_ssr_and_wait; echo -e "${GREEN}${INDENT}🔄 SSR 已重启${NC}"
@@ -427,7 +485,7 @@ auto_heal_ssr(){
   start_ssr_and_wait
 }
 
-# ========== 脚本自更新（含版本判断/镜像/强制） ==========
+# ========== 脚本自更新 ==========
 update_script() {
   echo -e "${BLUE}${INDENT}检查脚本更新...${NC}"
   local raw="${RAW_URL_DEFAULT}"
