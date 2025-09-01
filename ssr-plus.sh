@@ -1,7 +1,7 @@
 #!/bin/bash
 # 🚀 SSR-Plus Docker 管理脚本
 # 支持 Debian/Ubuntu/CentOS/RHEL/Rocky/AlmaLinux/Fedora/openSUSE
-# 版本号: v1.1.9
+# 版本号: v1.2.2
 
 stty erase ^H   # 让退格键在终端里正常工作
 
@@ -12,12 +12,15 @@ CONFIG_PATH="/etc/shadowsocks-r/config.json"
 # ========== 样式 ==========
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; CYAN='\e[36m'; NC='\e[0m'
 INDENT=" "
-VERSION="v1.1.9"
+VERSION="v1.2.2"
 
 # ========== 更新源（可配镜像/IPv4/IPv6/强制覆盖）==========
 RAW_URL_DEFAULT="https://raw.githubusercontent.com/Alvin9999/SSR-Plus/main/ssr-plus.sh"
 
-# 获取当前脚本的真实路径（便于原地覆盖）
+# ========== 小工具 ==========
+have_cmd(){ command -v "$1" >/dev/null 2>&1; }
+
+# 当前脚本真实路径
 script_path() {
   local p
   p="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "$0")"
@@ -27,12 +30,27 @@ script_path() {
   echo "$p"
 }
 
-# 用 curl 或 wget 下载到指定文件（支持 SSRPLUS_IPMODE=4/6、SSRPLUS_MIRROR）
+# 标准 base64（单行）
+enc_b64() {
+  if have_cmd openssl; then
+    printf '%s' "$1" | openssl enc -base64 -A
+  else
+    if base64 --help 2>/dev/null | grep -q -- '-w'; then
+      printf '%s' "$1" | base64 -w0
+    else
+      printf '%s' "$1" | base64 | tr -d '\n'
+    fi
+  fi
+}
+# URL-safe base64（去 '='，将 '+/' → '-_'）
+enc_b64url(){ enc_b64 "$1" | tr '+/' '-_' | tr -d '='; }
+
+# 下载工具（支持 SSRPLUS_IPMODE=4/6、SSRPLUS_MIRROR）
 fetch_to() {
   local url="$1" out="$2" opts=()
   [[ "$SSRPLUS_IPMODE" = "4" ]] && opts+=(-4)
   [[ "$SSRPLUS_IPMODE" = "6" ]] && opts+=(-6)
-  if command -v curl >/dev/null 2>&1; then
+  if have_cmd curl; then
     curl -fsSL "${opts[@]}" "$url" -o "$out"
   else
     wget -q "${opts[@]}" -O "$out" "$url"
@@ -108,6 +126,57 @@ check_bbr(){
   local cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
   local qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
   [[ "$cc" == "bbr" && "$qdisc" == "fq" ]] && BBR_STATUS="${GREEN}已启用 BBR${NC}" || BBR_STATUS="${RED}未启用 BBR${NC}"
+}
+
+# ========== 多 IP 收集（仅公网） ==========
+MAX_V6_TO_SHOW=5
+
+is_public_v4() {
+  [[ "$1" =~ ^10\. ]] && return 1
+  [[ "$1" =~ ^127\. ]] && return 1
+  [[ "$1" =~ ^169\.254\. ]] && return 1
+  [[ "$1" =~ ^192\.168\. ]] && return 1
+  [[ "$1" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] && return 1
+  [[ "$1" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\. ]] && return 1
+  [[ "$1" = "0.0.0.0" ]] && return 1
+  return 0
+}
+
+get_ipv4_list() {
+  local ips=()
+  if have_cmd ip; then
+    while IFS= read -r ip4; do
+      is_public_v4 "$ip4" && ips+=("$ip4")
+    done < <(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)
+  else
+    while IFS= read -r ip4; do
+      [[ "$ip4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && is_public_v4 "$ip4" && ips+=("$ip4")
+    done < <(hostname -I 2>/dev/null | tr ' ' '\n')
+  fi
+  printf '%s\n' "${ips[@]}"
+}
+
+# ========== 可靠读取容器配置 ==========
+read_config_vars() {
+  local out
+  out=$(docker exec -i "$CONTAINER_NAME" python - <<'PY'
+import json,sys
+p="/etc/shadowsocks-r/config.json"
+try:
+    with open(p,"r") as f:
+        d=json.load(f)
+    def esc(v):
+        return (str(v) if v is not None else "").replace("\\","\\\\").replace("$","\\$").replace("`","\\`").replace('"','\\"')
+    print('PORT="%s"' % esc(d.get("server_port","")))
+    print('PASSWORD="%s"' % esc(d.get("password","")))
+    print('METHOD="%s"' % esc(d.get("method","")))
+    print('PROTOCOL="%s"' % esc(d.get("protocol","")))
+    print('OBFS="%s"' % esc(d.get("obfs","")))
+except Exception:
+    pass
+PY
+)
+  eval "$out"
 }
 
 # ========== 选择项 ==========
@@ -192,41 +261,76 @@ set_config(){
 EOF
 }
 
-generate_ssr_link(){
-  local ip=$(curl -s ifconfig.me)
-  local pass_b64=$(echo -n "${PASSWORD}" | base64 -w0)
-  local raw="${ip}:${PORT}:${PROTOCOL}:${METHOD}:${OBFS}:${pass_b64}/"
-  echo -e "\n${GREEN}${INDENT}SSR 链接:${NC}\n${INDENT}ssr://$(echo -n "$raw" | base64 -w0)\n"
+# ========== 链接与配置展示（仅公网 IPv4，URL-safe 外层） ==========
+generate_ssr_link() {
+  # 以容器实际配置为准，避免变量与实际不一致
+  read_config_vars
+
+  # 只收集公网 IPv4
+  local v4s=()
+  mapfile -t v4s < <(get_ipv4_list)
+
+  # 组件编码（URL-safe）
+  local pwd_b64url remarks_b64url group_b64url
+  pwd_b64url="$(enc_b64url "$PASSWORD")"
+
+  echo -e "\n${GREEN}${INDENT}SSR 链接（任选其一导入客户端）：${NC}"
+
+  if ((${#v4s[@]})); then
+    for ip4 in "${v4s[@]}"; do
+      remarks_b64url="$(enc_b64url "SSR-Plus:${ip4}:${PORT}")"
+      group_b64url="$(enc_b64url "SSR-Plus")"
+      # 规范 Raw：只有一个 ?，空参数也保留 key
+      local raw="${ip4}:${PORT}:${PROTOCOL}:${METHOD}:${OBFS}:${pwd_b64url}/?obfsparam=&protoparam=&remarks=${remarks_b64url}&group=${group_b64url}"
+      # 外层 URL-safe base64
+      local link="ssr://$(enc_b64url "$raw")"
+      echo -e "${INDENT}- ${YELLOW}${ip4}${NC}: ${link}"
+    done
+  else
+    echo -e "${INDENT}- ${YELLOW}未检测到公网 IPv4${NC}"
+  fi
+
+  echo
 }
 
-show_config(){
+show_config() {
   command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { echo -e "${RED}${INDENT}Docker 未运行${NC}"; return; }
   docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
   docker exec "$CONTAINER_NAME" test -f "$CONFIG_PATH" || { echo -e "${YELLOW}${INDENT}容器内未找到配置文件${NC}"; return; }
-  local cfg=$(docker exec -i $CONTAINER_NAME cat $CONFIG_PATH 2>/dev/null); local ip=$(curl -s ifconfig.me)
-  PORT=$(echo "$cfg" | grep '"server_port"' | awk -F ':' '{print $2}' | tr -d ' ,')
-  PASSWORD=$(echo "$cfg" | grep '"password"' | awk -F '"' '{print $4}')
-  METHOD=$(echo "$cfg" | grep '"method"' | awk -F '"' '{print $4}')
-  PROTOCOL=$(echo "$cfg" | grep '"protocol"' | awk -F '"' '{print $4}')
-  OBFS=$(echo "$cfg" | grep '"obfs"' | awk -F '"' '{print $4}')
+
+  # 用容器内的真实配置，避免变量不同步
+  read_config_vars
+
+  # 只收集并展示公网 IPv4
+  local v4_list
+  v4_list=$(get_ipv4_list | paste -sd, -)
+
   echo -e "${CYAN}${INDENT}===== 当前 SSR 配置 =====${NC}"
-  echo -e "${INDENT}🌐 服务器   : ${YELLOW}$ip${NC}"
-  echo -e "${INDENT}🔌 端口     : ${YELLOW}$PORT${NC}"
-  echo -e "${INDENT}🔑 密码     : ${YELLOW}$PASSWORD${NC}"
-  echo -e "${INDENT}🔒 加密方式 : ${YELLOW}$METHOD${NC}"
-  echo -e "${INDENT}📜 协议     : ${YELLOW}$PROTOCOL${NC}"
-  echo -e "${INDENT}🎭 混淆     : ${YELLOW}$OBFS${NC}"
+  echo -e "${INDENT}🌐 IPv4     : ${YELLOW}${v4_list:-无}${NC}"
+  echo -e "${INDENT}🔌 端口     : ${YELLOW}${PORT}${NC}"
+  echo -e "${INDENT}🔑 密码     : ${YELLOW}${PASSWORD}${NC}"
+  echo -e "${INDENT}🔒 加密方式 : ${YELLOW}${METHOD}${NC}"
+  echo -e "${INDENT}📜 协议     : ${YELLOW}${PROTOCOL}${NC}"
+  echo -e "${INDENT}🎭 混淆     : ${YELLOW}${OBFS}${NC}"
   echo -e "${CYAN}${INDENT}=========================${NC}"
+
+  # 生成链接：默认仅 IPv4（除非你显式设置 SSRPLUS_IPV6_LINK=1）
   generate_ssr_link
 }
 
 # ========== 启动等待 & 重试 ==========
 start_ssr_and_wait(){
   docker exec -d "$CONTAINER_NAME" python /usr/local/shadowsocks/server.py -c "$CONFIG_PATH" -d start
-  for i in {1..5}; do sleep 1; docker exec "$CONTAINER_NAME" pgrep -f "server.py" >/dev/null 2>&1 && { echo -e "${GREEN}${INDENT}✅ SSR 已启动${NC}"; return 0; }; done
+  for i in {1..5}; do
+    sleep 1
+    docker exec "$CONTAINER_NAME" pgrep -f "server.py" >/dev/null 2>&1 && { echo -e "${GREEN}${INDENT}✅ SSR 已启动${NC}"; return 0; }
+  done
   docker exec -d "$CONTAINER_NAME" python /usr/local/shadowsocks/server.py -c "$CONFIG_PATH" -d start
-  sleep 1; docker exec "$CONTAINER_NAME" pgrep -f "server.py" >/dev/null 2>&1 && { echo -e "${GREEN}${INDENT}✅ SSR 已启动${NC}"; return 0; }
-  echo -e "${RED}${INDENT}❌ SSR 启动失败，最近日志：${NC}"; docker logs --tail 80 "$CONTAINER_NAME" 2>&1 | sed "s/^/${INDENT}/"; return 1
+  sleep 1
+  docker exec "$CONTAINER_NAME" pgrep -f "server.py" >/dev/null 2>&1 && { echo -e "${GREEN}${INDENT}✅ SSR 已启动${NC}"; return 0; }
+  echo -e "${RED}${INDENT}❌ SSR 启动失败，最近日志：${NC}"
+  docker logs --tail 80 "$CONTAINER_NAME" 2>&1 | sed "s/^/${INDENT}/"
+  return 1
 }
 
 # ========== 生成容器（带自启守护脚本） ==========
@@ -278,12 +382,7 @@ change_config(){
 
   echo -e "${BLUE}${INDENT}修改 SSR 配置...${NC}"
   if docker exec "$CONTAINER_NAME" test -f "$CONFIG_PATH"; then
-    local cfg=$(docker exec -i $CONTAINER_NAME cat $CONFIG_PATH 2>/dev/null)
-    PORT=$(echo "$cfg" | grep '"server_port"' | awk -F ':' '{print $2}' | tr -d ' ,')
-    PASSWORD=$(echo "$cfg" | grep '"password"' | awk -F '"' '{print $4}')
-    METHOD=$(echo "$cfg" | grep '"method"' | awk -F '"' '{print $4}')
-    PROTOCOL=$(echo "$cfg" | grep '"protocol"' | awk -F '"' '{print $4}')
-    OBFS=$(echo "$cfg" | grep '"obfs"' | awk -F '"' '{print $4}')
+    read_config_vars
   fi
 
   read -p "${INDENT}新端口 (回车保留: ${PORT:-20000}): " NEW_PORT
@@ -292,7 +391,7 @@ change_config(){
   NEW_PORT=${NEW_PORT:-$PORT}; PASSWORD=${NEW_PASSWORD:-$PASSWORD}
 
   if [ "$NEW_PORT" != "$PORT" ] && [ -n "$NEW_PORT" ]; then
-    echo -e "${YELLOW}${INDENT}配置改变，重新创建容器，请稍等...${NC}"
+    echo -e "${YELLOW}${INDENT}端口改变，重新创建容器...${NC}"
     docker stop $CONTAINER_NAME >/dev/null 2>&1; docker rm $CONTAINER_NAME >/dev/null 2>&1
     run_container_with_boot "${NEW_PORT}"
     sleep 1
@@ -333,7 +432,7 @@ restart_ssr(){
 }
 
 uninstall_ssr(){
-  echo -e "${RED}${INDENT}卸载 SSR，正在卸载，请稍等...${NC}"
+  echo -e "${RED}${INDENT}卸载 SSR...${NC}"
   if command -v docker >/dev/null 2>&1; then docker stop $CONTAINER_NAME >/dev/null 2>&1; docker rm $CONTAINER_NAME >/dev/null 2>&1; docker rmi $DOCKER_IMAGE >/dev/null 2>&1; fi
   echo -e "${RED}${INDENT}✅ SSR 已卸载完成${NC}"
 }
@@ -363,7 +462,7 @@ auto_heal_ssr(){
   start_ssr_and_wait
 }
 
-# ========== 脚本自更新（含版本判断/镜像/强制） ==========
+# ========== 脚本自更新 ==========
 update_script() {
   echo -e "${BLUE}${INDENT}检查脚本更新...${NC}"
   local raw="${RAW_URL_DEFAULT}"
@@ -397,10 +496,12 @@ update_script() {
 
   if [[ "$lv" = "$rv" && "$SSRPLUS_FORCE" != "1" ]]; then
     echo -e "${GREEN}${INDENT}✅ 已是最新版：${local_ver}${NC}"
+    echo -e "${INDENT}如需强制覆盖，请： export SSRPLUS_FORCE=1  后再执行更新。"
     rm -f "$tmp"; return 0
   fi
   if [[ "$max" = "$lv" && "$lv" != "$rv" && "$SSRPLUS_FORCE" != "1" ]]; then
     echo -e "${YELLOW}${INDENT}ℹ️ 本地版本 (${local_ver}) 新于远端 (${remote_ver})，跳过更新${NC}"
+    echo -e "${INDENT}如需覆盖远端版本，可： export SSRPLUS_FORCE=1  后再执行更新。"
     rm -f "$tmp"; return 0
   fi
 
