@@ -1,7 +1,7 @@
 #!/bin/bash
 # 🚀 SSR-Plus Docker 管理脚本
 # 支持 Debian/Ubuntu/CentOS/RHEL/Rocky/AlmaLinux/Fedora/openSUSE
-# 版本号: v1.2.1
+# 版本号: v1.2.2
 
 stty erase ^H   # 让退格键在终端里正常工作
 
@@ -266,49 +266,33 @@ EOF
 
 # ========== 链接与配置展示（多 IP + URL-safe） ==========
 generate_ssr_link() {
-  # 组件编码
-  local pwd_b64 url_pwd_b64 obfsparam_b64 protoparam_b64 remarks_b64 group_b64
-  pwd_b64="$(enc_b64 "$PASSWORD")"               # 传统实现多为标准 base64
-  url_pwd_b64="$(enc_b64url "$PASSWORD")"        # 也有客户端更偏好 url-safe
-  obfsparam_b64="$(enc_b64url "")"
-  protoparam_b64="$(enc_b64url "")"
+  # 组件编码（按常见 SSR 客户端习惯：密码用标准 base64；外层链接也用标准 base64）
+  local pwd_b64 remarks_b64 group_b64
+  pwd_b64="$(enc_b64 "$PASSWORD")"
 
-  # 收集本机全部公网 IPv4 / IPv6
-  local v4s=() v6s=()
+  # 收集本机全部“公网 IPv4”
+  local v4s=()
   mapfile -t v4s < <(get_ipv4_list)
-  mapfile -t v6s < <(get_ipv6_list)
 
-  echo -e "\n${GREEN}${INDENT}SSR 链接（可任选其一导入客户端）：${NC}"
+  echo -e "\n${GREEN}${INDENT}SSR 链接（任选其一导入客户端）：${NC}"
 
-  # IPv4：生成两种（兼容性最好）：密码部分用标准 b64，整体用 url-safe b64
   if ((${#v4s[@]})); then
     for ip4 in "${v4s[@]}"; do
-      remarks_b64="$(enc_b64url "SSR-Plus:${ip4}:${PORT}")"
-      group_b64="$(enc_b64url "SSR-Plus")"
-      local raw_std="${ip4}:${PORT}:${PROTOCOL}:${METHOD}:${OBFS}:${pwd_b64}/?obfsparam=${obfsparam_b64}&protoparam=${protoparam_b64}&remarks=${remarks_b64}&group=${group_b64}"
-      echo -e "${INDENT}- IPv4: ssr://$(enc_b64url "$raw_std")"
+      remarks_b64="$(enc_b64 "SSR-Plus:${ip4}:${PORT}")"
+      group_b64="$(enc_b64 "SSR-Plus")"
+      # 按通用格式拼接原始串（注意：只有一个 '?'）
+      local raw="${ip4}:${PORT}:${PROTOCOL}:${METHOD}:${OBFS}:${pwd_b64}/?obfsparam=&protoparam=&remarks=${remarks_b64}&group=${group_b64}"
+      # 外层使用“标准 base64”并去掉换行
+      local link="ssr://$(enc_b64 "$raw")"
+      echo -e "${INDENT}- ${YELLOW}${ip4}${NC}: ${link}"
     done
   else
-    echo -e "${INDENT}- IPv4: ${YELLOW}未检测到公网 IPv4${NC}"
+    echo -e "${INDENT}- ${YELLOW}未检测到公网 IPv4${NC}"
   fi
 
-  # IPv6：大多客户端也支持；若少数不识别，请“手动填参数或用域名”
-  if ((${#v6s[@]})); then
-    local n=0
-    echo -e "\n${YELLOW}${INDENT}提示：若以下 IPv6 链接导入失败，请在客户端手动填写服务器=该 IPv6、端口=${PORT}，其余参数同下。${NC}"
-    for ip6 in "${v6s[@]}"; do
-      remarks_b64="$(enc_b64url "SSR-Plus:${ip6}:${PORT}")"
-      group_b64="$(enc_b64url "SSR-Plus")"
-      local raw_v6="${ip6}:${PORT}:${PROTOCOL}:${METHOD}:${OBFS}:${url_pwd_b64}/?obfsparam=${obfsparam_b64}&protoparam=${protoparam_b64}&remarks=${remarks_b64}&group=${group_b64}"
-      echo -e "${INDENT}- IPv6: ssr://$(enc_b64url "$raw_v6")"
-      ((n++)); [[ $n -ge ${MAX_V6_TO_SHOW:-5} ]] && break
-    done
-    (( ${#v6s[@]} > n )) && echo -e "${INDENT}  …其余 IPv6 已省略（共 ${#v6s[@]} 条，展示 $n 条）"
-  else
-    echo -e "${INDENT}- IPv6: ${YELLOW}未检测到公网 IPv6${NC}"
-  fi
-
-  echo
+  # 不输出 IPv6 链接：给出友好提示
+  echo -e "\n${YELLOW}${INDENT}提示：如需使用 IPv6，请在客户端把“服务器地址”手动改为你的 IPv6，其它参数（端口/密码/加密/协议/混淆）保持一致即可；"
+  echo -e "${INDENT}或直接使用你的域名（建议配置 AAAA 记录）。${NC}\n"
 }
 
 show_config(){
@@ -325,7 +309,7 @@ show_config(){
   PROTOCOL=$(echo "$cfg" | grep '"protocol"' | awk -F '"' '{print $4}')
   OBFS=$(echo "$cfg" | grep '"obfs"' | awk -F '"' '{print $4}')
 
-  # 汇总公网 IP
+  # 公网 IPv4/IPv6（仅展示，链接只给 IPv4）
   local v4_list v6_list
   v4_list=$(get_ipv4_list | paste -sd, -)
   v6_list=$(get_ipv6_list | paste -sd, -)
@@ -339,8 +323,10 @@ show_config(){
   echo -e "${INDENT}📜 协议     : ${YELLOW}$PROTOCOL${NC}"
   echo -e "${INDENT}🎭 混淆     : ${YELLOW}$OBFS${NC}"
   echo -e "${CYAN}${INDENT}=========================${NC}"
+
   generate_ssr_link
 }
+
 
 # ========== 启动等待 & 重试 ==========
 start_ssr_and_wait(){
