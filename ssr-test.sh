@@ -293,33 +293,28 @@ generate_ssr_link() {
   echo
 }
 
-show_config(){
+show_config() {
   command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { echo -e "${RED}${INDENT}Docker 未运行${NC}"; return; }
   docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
   docker exec "$CONTAINER_NAME" test -f "$CONFIG_PATH" || { echo -e "${YELLOW}${INDENT}容器内未找到配置文件${NC}"; return; }
 
-  # 使用 Python 读取，避免 grep/awk 误读
+  # 用容器内的真实配置，避免变量不同步
   read_config_vars
 
-  # 展示当前主机的 IPv4/IPv6（仅展示，链接只给 IPv4）
-  local v4_list v6_list
+  # 只收集并展示公网 IPv4
+  local v4_list
   v4_list=$(get_ipv4_list | paste -sd, -)
-  # 只展示 IPv6（不生成链接）：保留辅助排查
-  if have_cmd ip; then
-    v6_list=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2}' | cut -d/ -f1 | paste -sd, -)
-  else
-    v6_list=$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/:/' | paste -sd, -)
-  fi
 
   echo -e "${CYAN}${INDENT}===== 当前 SSR 配置 =====${NC}"
   echo -e "${INDENT}🌐 IPv4     : ${YELLOW}${v4_list:-无}${NC}"
-  echo -e "${INDENT}🌐 IPv6     : ${YELLOW}${v6_list:-无}${NC}"
   echo -e "${INDENT}🔌 端口     : ${YELLOW}${PORT}${NC}"
   echo -e "${INDENT}🔑 密码     : ${YELLOW}${PASSWORD}${NC}"
   echo -e "${INDENT}🔒 加密方式 : ${YELLOW}${METHOD}${NC}"
   echo -e "${INDENT}📜 协议     : ${YELLOW}${PROTOCOL}${NC}"
   echo -e "${INDENT}🎭 混淆     : ${YELLOW}${OBFS}${NC}"
   echo -e "${CYAN}${INDENT}=========================${NC}"
+
+  # 生成链接：默认仅 IPv4（除非你显式设置 SSRPLUS_IPV6_LINK=1）
   generate_ssr_link
 }
 
