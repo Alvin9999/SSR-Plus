@@ -1,7 +1,12 @@
 #!/bin/bash
-# 🚀 SSR-Plus Docker 管理脚本
+# ================================================================
+# 🚀 SSR-Plus Docker 管理脚本（含 IPv4/IPv6 双栈增强）
 # 支持 Debian/Ubuntu/CentOS/RHEL/Rocky/AlmaLinux/Fedora/openSUSE
-# 版本号: v1.2.2
+# 版本号: v1.2.2+ipv6
+# 说明：
+#  - 自动检测：仅 IPv4 的机器 → 只发布/显示 IPv4；双栈 → 同时发布/显示。
+#  - IPv6 ssr:// 链接建议使用域名（环境变量 SSRPLUS_IPV6_HOST）以保证兼容性。
+# ================================================================
 
 stty erase ^H   # 让退格键在终端里正常工作
 
@@ -12,7 +17,7 @@ CONFIG_PATH="/etc/shadowsocks-r/config.json"
 # ========== 样式 ==========
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; CYAN='\e[36m'; NC='\e[0m'
 INDENT=" "
-VERSION="v1.2.2"
+VERSION="v1.2.2+ipv6"
 
 # ========== 更新源（可配镜像/IPv4/IPv6/强制覆盖）==========
 RAW_URL_DEFAULT="https://raw.githubusercontent.com/Alvin9999/SSR-Plus/main/ssr-plus.sh"
@@ -112,7 +117,7 @@ ensure_docker_running(){ command -v docker >/dev/null 2>&1 || return 1; docker i
 check_ssr_status(){
   if ! command -v docker >/dev/null 2>&1; then SSR_STATUS="${RED}未安装 (Docker 未安装)${NC}"; return; fi
   docker info >/dev/null 2>&1 || { SSR_STATUS="${RED}Docker 未运行${NC}"; return; }
-  docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$" || { SSR_STATUS="${RED}未安装${NC}"; return; }
+  docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$" || { SSR_STATUS="${RED}未安装${NC}"; return; }
   [ "$(docker inspect -f '{{.State.Running}}' $CONTAINER_NAME 2>/dev/null)" = "true" ] || { SSR_STATUS="${YELLOW}容器已停止${NC}"; return; }
   if docker exec "$CONTAINER_NAME" pgrep -f "server.py" >/dev/null 2>&1; then
     SSR_STATUS="${GREEN}已启动${NC}"
@@ -156,6 +161,36 @@ get_ipv4_list() {
   printf '%s\n' "${ips[@]}"
 }
 
+# ---------- IPv6 能力探测与收集 ----------
+ipv6_available() {
+  [[ -f /proc/net/if_inet6 ]] && [[ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null)" != "1" ]]
+}
+# Docker bridge 是否启用 IPv6（避免 -p [::]:… 时报错）
+docker_bridge_ipv6_enabled() {
+  command -v docker >/dev/null 2>&1 || return 1
+  docker network inspect bridge 2>/dev/null | grep -q '"EnableIPv6": *true'
+}
+# 过滤掉本地/链路本地/ULA 等非公网 v6
+is_public_v6() {
+  local ip="${1,,}"
+  [[ "$ip" == "::1" ]] && return 1
+  [[ "$ip" == fe80:* ]] && return 1
+  [[ "$ip" == fc* || "$ip" == fd* ]] && return 1
+  [[ "$ip" == :: ]] && return 1
+  return 0
+}
+# 收集本机公网 IPv6 列表
+get_ipv6_list() {
+  local ips=()
+  if command -v ip >/dev/null 2>&1; then
+    while IFS= read -r ip6; do
+      ip6="${ip6,,}"
+      is_public_v6 "$ip6" && ips+=("$ip6")
+    done < <(ip -6 addr show scope global 2>/dev/null | awk '/inet6 /{print $2}' | cut -d/ -f1)
+  fi
+  printf '%s\n' "${ips[@]}"
+}
+
 # ========== 可靠读取容器配置 ==========
 read_config_vars() {
   local out
@@ -175,7 +210,7 @@ try:
 except Exception:
     pass
 PY
-)
+  )
   eval "$out"
 }
 
@@ -261,52 +296,68 @@ set_config(){
 EOF
 }
 
-# ========== 链接与配置展示（仅公网 IPv4，URL-safe 外层） ==========
+# ========== 链接与配置展示（IPv4/IPv6） ==========
 generate_ssr_link() {
   # 以容器实际配置为准，避免变量与实际不一致
   read_config_vars
 
-  # 只收集公网 IPv4
-  local v4s=()
+  # 收集公网 IPv4/IPv6
+  local v4s=() v6s=()
   mapfile -t v4s < <(get_ipv4_list)
+  mapfile -t v6s < <(get_ipv6_list)
 
   # 组件编码（URL-safe）
   local pwd_b64url remarks_b64url group_b64url
   pwd_b64url="$(enc_b64url "$PASSWORD")"
+  group_b64url="$(enc_b64url "SSR-Plus")"
 
-  echo -e "\n${GREEN}${INDENT}SSR 链接（任选其一导入客户端）：${NC}"
+  echo -e "\n${GREEN}${INDENT}SSR 链接（按需导入）：${NC}"
 
+  # IPv4 链接
   if ((${#v4s[@]})); then
     for ip4 in "${v4s[@]}"; do
-      remarks_b64url="$(enc_b64url "SSR-Plus:${ip4}:${PORT}")"
-      group_b64url="$(enc_b64url "SSR-Plus")"
-      # 规范 Raw：只有一个 ?，空参数也保留 key
+      remarks_b64url="$(enc_b64url "SSR-Plus:[IPv4] ${ip4}:${PORT}")"
       local raw="${ip4}:${PORT}:${PROTOCOL}:${METHOD}:${OBFS}:${pwd_b64url}/?obfsparam=&protoparam=&remarks=${remarks_b64url}&group=${group_b64url}"
-      # 外层 URL-safe base64
-      local link="ssr://$(enc_b64url "$raw")"
-      echo -e "${INDENT}- ${YELLOW}${ip4}${NC}: ${link}"
+      echo -e "${INDENT}- ${YELLOW}[IPv4] ${ip4}${NC}: ssr://$(enc_b64url "$raw")"
     done
   else
-    echo -e "${INDENT}- ${YELLOW}未检测到公网 IPv4${NC}"
+    echo -e "${INDENT}- ${YELLOW}[IPv4] 未检测到公网 IPv4${NC}"
   fi
 
+  # IPv6 链接（推荐使用域名）
+  if ((${#v6s[@]})); then
+    if [[ -n "$SSRPLUS_IPV6_HOST" ]]; then
+      local host="$SSRPLUS_IPV6_HOST"
+      remarks_b64url="$(enc_b64url "SSR-Plus:[IPv6] ${host}:${PORT}")"
+      local raw6="${host}:${PORT}:${PROTOCOL}:${METHOD}:${OBFS}:${pwd_b64url}/?obfsparam=&protoparam=&remarks=${remarks_b64url}&group=${group_b64url}"
+      echo -e "${INDENT}- ${YELLOW}[IPv6] ${host}${NC}: ssr://$(enc_b64url "$raw6")"
+    else
+      local shown=0
+      for ip6 in "${v6s[@]}"; do
+        echo -e "${INDENT}- ${YELLOW}[IPv6] ${ip6}${NC}: （未设置 SSRPLUS_IPV6_HOST，无法生成通用 ssr:// 链接；建议使用带 AAAA 记录的域名）"
+        ((shown++>=2)) && break
+      done
+    fi
+  fi
   echo
 }
 
 show_config() {
   command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { echo -e "${RED}${INDENT}Docker 未运行${NC}"; return; }
-  docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
+  docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
   docker exec "$CONTAINER_NAME" test -f "$CONFIG_PATH" || { echo -e "${YELLOW}${INDENT}容器内未找到配置文件${NC}"; return; }
 
   # 用容器内的真实配置，避免变量不同步
   read_config_vars
 
-  # 只收集并展示公网 IPv4
-  local v4_list
+  # 展示 IPv4/IPv6 列表
+  local v4_list v6_list
   v4_list=$(get_ipv4_list | paste -sd, -)
+  v6_list=$(get_ipv6_list | head -n ${MAX_V6_TO_SHOW:-5} | paste -sd, -)
 
   echo -e "${CYAN}${INDENT}===== 当前 SSR 配置 =====${NC}"
   echo -e "${INDENT}🌐 IPv4     : ${YELLOW}${v4_list:-无}${NC}"
+  echo -e "${INDENT}🌐 IPv6     : ${YELLOW}${v6_list:-无}${NC}"
   echo -e "${INDENT}🔌 端口     : ${YELLOW}${PORT}${NC}"
   echo -e "${INDENT}🔑 密码     : ${YELLOW}${PASSWORD}${NC}"
   echo -e "${INDENT}🔒 加密方式 : ${YELLOW}${METHOD}${NC}"
@@ -314,7 +365,6 @@ show_config() {
   echo -e "${INDENT}🎭 混淆     : ${YELLOW}${OBFS}${NC}"
   echo -e "${CYAN}${INDENT}=========================${NC}"
 
-  # 生成链接：默认仅 IPv4（除非你显式设置 SSRPLUS_IPV6_LINK=1）
   generate_ssr_link
 }
 
@@ -336,25 +386,22 @@ start_ssr_and_wait(){
 # ========== 生成容器（带自启守护脚本） ==========
 run_container_with_boot(){
   local map_port="$1"
+
+  # 构造端口映射：IPv4 始终发布；IPv6 仅在宿主和 Docker 都支持时发布
+  local port_flags=( -p "${map_port}:${map_port}" )
+  if ipv6_available && docker_bridge_ipv6_enabled; then
+    port_flags+=( -p "[::]:${map_port}:${map_port}" )
+  else
+    [[ -n "$INDENT" ]] && echo -e "${YELLOW}${INDENT}提示：未检测到 Docker IPv6（或宿主未启用），跳过 IPv6 端口发布${NC}"
+  fi
+
   docker run -dit --name $CONTAINER_NAME \
     --restart unless-stopped \
-    -p ${map_port}:${map_port} \
+    ${port_flags[@]} \
     --health-cmd "python -c 'import socket,sys; s=socket.socket(); s.settimeout(2); s.connect((\"127.0.0.1\",${map_port})); s.close()' || exit 1" \
     --health-interval 10s --health-retries 3 --health-timeout 3s --health-start-period 5s \
     $DOCKER_IMAGE \
-    bash -lc 'cat >/usr/local/bin/ssr-boot.sh << "SH"
-#!/bin/bash
-CFG="/etc/shadowsocks-r/config.json"
-# 等待配置文件写入
-for i in {1..60}; do [ -f "$CFG" ] && break; sleep 1; done
-sleep 2
-pgrep -f server.py >/dev/null 2>&1 || python /usr/local/shadowsocks/server.py -c "$CFG" -d start
-while sleep 5; do
-  pgrep -f server.py >/dev/null 2>&1 || python /usr/local/shadowsocks/server.py -c "$CFG" -d start
-done
-SH
-chmod +x /usr/local/bin/ssr-boot.sh
-exec /usr/local/bin/ssr-boot.sh'
+    bash -lc 'cat >/usr/local/bin/ssr-boot.sh << "SH"\n#!/bin/bash\nCFG="/etc/shadowsocks-r/config.json"\n# 等待配置文件写入\nfor i in {1..60}; do [ -f "$CFG" ] && break; sleep 1; done\nsleep 2\npgrep -f server.py >/dev/null 2>&1 || python /usr/local/shadowsocks/server.py -c "$CFG" -d start\nwhile sleep 5; do\n  pgrep -f server.py >/dev/null 2>&1 || python /usr/local/shadowsocks/server.py -c "$CFG" -d start\ndone\nSH\nchmod +x /usr/local/bin/ssr-boot.sh\nexec /usr/local/bin/ssr-boot.sh'
 }
 
 # ========== 功能 ==========
@@ -378,7 +425,7 @@ install_ssr(){
 
 change_config(){
   ensure_docker_running || { echo -e "${RED}${INDENT}Docker 未运行${NC}"; return; }
-  docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
+  docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
 
   echo -e "${BLUE}${INDENT}修改 SSR 配置...${NC}"
   if docker exec "$CONTAINER_NAME" test -f "$CONFIG_PATH"; then
@@ -408,7 +455,7 @@ change_config(){
 
 start_ssr(){
   ensure_docker_running || { echo -e "${RED}${INDENT}Docker 未运行${NC}"; return; }
-  docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
+  docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
   [ "$(docker inspect -f '{{.State.Running}}' $CONTAINER_NAME 2>/dev/null)" = "true" ] || docker start "$CONTAINER_NAME" >/dev/null 2>&1
   docker exec "$CONTAINER_NAME" test -f "$CONFIG_PATH" || { echo -e "${YELLOW}${INDENT}未发现配置文件${NC}"; return; }
   start_ssr_and_wait
@@ -416,7 +463,7 @@ start_ssr(){
 
 stop_ssr(){
   ensure_docker_running || { echo -e "${RED}${INDENT}Docker 未运行${NC}"; return; }
-  docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
+  docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
   [ "$(docker inspect -f '{{.State.Running}}' $CONTAINER_NAME 2>/dev/null)" = "true" ] && docker exec -d "$CONTAINER_NAME" python /usr/local/shadowsocks/server.py -c "$CONFIG_PATH" -d stop
   sleep 1
   docker exec "$CONTAINER_NAME" pgrep -f "server.py" >/dev/null 2>&1 && echo -e "${RED}${INDENT}❌ SSR 停止失败${NC}" || echo -e "${YELLOW}${INDENT}🛑 SSR 已停止${NC}"
@@ -424,7 +471,7 @@ stop_ssr(){
 
 restart_ssr(){
   ensure_docker_running || { echo -e "${RED}${INDENT}Docker 未运行${NC}"; return; }
-  docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
+  docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
   [ "$(docker inspect -f '{{.State.Running}}' $CONTAINER_NAME 2>/dev/null)" = "true" ] || docker start "$CONTAINER_NAME" >/dev/null 2>&1
   docker exec "$CONTAINER_NAME" test -f "$CONFIG_PATH" || { echo -e "${YELLOW}${INDENT}未发现配置文件${NC}"; return; }
   docker exec -d "$CONTAINER_NAME" python /usr/local/shadowsocks/server.py -c "$CONFIG_PATH" -d stop
@@ -456,7 +503,7 @@ optimize_system(){
 # ========== 自愈（保留） ==========
 auto_heal_ssr(){
   command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || return
-  docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$" || return
+  docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$" || return
   docker exec "$CONTAINER_NAME" pgrep -f "server.py" >/dev/null 2>&1 && return
   echo -e "${YELLOW}${INDENT}检测到 SSR 未运行，尝试自动拉起...${NC}"
   start_ssr_and_wait
