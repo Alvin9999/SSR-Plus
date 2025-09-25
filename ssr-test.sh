@@ -1,10 +1,12 @@
 #!/bin/bash
 # ================================================================
-# 🚀 SSR-Plus Docker 管理脚本（含 IPv4/IPv6 双栈增强）
+# 🚀 SSR-Plus Docker 管理脚本（含 IPv4/IPv6 双栈增强 & 自动开启 Docker IPv6）
 # 支持 Debian/Ubuntu/CentOS/RHEL/Rocky/AlmaLinux/Fedora/openSUSE
-# 版本号: v1.2.2+ipv6
+# 版本号: v1.3.0+ipv6
 # 说明：
-#  - 自动检测：仅 IPv4 的机器 → 只发布/显示 IPv4；双栈 → 同时发布/显示。
+#  - 仅 IPv4 的机器 → 只发布/显示 IPv4；双栈 → 同时发布/显示。
+#  - 自动：若检测到 Docker 未启用 IPv6，脚本会**自动配置 /etc/docker/daemon.json**，
+#    开启 "ipv6": true 与 "fixed-cidr-v6"，并重启 Docker（需 root）。
 #  - IPv6 ssr:// 链接建议使用域名（环境变量 SSRPLUS_IPV6_HOST）以保证兼容性。
 # ================================================================
 
@@ -17,7 +19,7 @@ CONFIG_PATH="/etc/shadowsocks-r/config.json"
 # ========== 样式 ==========
 RED='\e[31m'; GREEN='\e[32m'; YELLOW='\e[33m'; BLUE='\e[34m'; CYAN='\e[36m'; NC='\e[0m'
 INDENT=" "
-VERSION="v1.2.2+ipv6"
+VERSION="v1.3.0+ipv6"
 
 # ========== 更新源（可配镜像/IPv4/IPv6/强制覆盖）==========
 RAW_URL_DEFAULT="https://raw.githubusercontent.com/Alvin9999/SSR-Plus/main/ssr-plus.sh"
@@ -106,12 +108,77 @@ install_docker(){
       ;;
   esac
   command -v docker >/dev/null 2>&1 || { echo -e "${RED}${INDENT}❌ Docker 未安装成功${NC}"; exit 1; }
-  systemctl enable docker >/dev/null 2>&1
-  systemctl start docker
+  systemctl enable docker >/dev/null 2>&1 || true
+  systemctl start docker 2>/dev/null || service docker start 2>/dev/null || true
 }
 
-# ========== 确保 Docker 运行 ==========
-ensure_docker_running(){ command -v docker >/dev/null 2>&1 || return 1; docker info >/dev/null 2>&1 || systemctl start docker; docker info >/dev/null 2>&1; }
+# ========== 确保 Docker 与 IPv6 ==========
+ensure_docker_running(){ command -v docker >/dev/null 2>&1 || return 1; docker info >/dev/null 2>&1 || systemctl start docker 2>/dev/null || service docker start 2>/dev/null; docker info >/dev/null 2>&1; }
+
+# 运行时及持久化开启内核 IPv6
+ensure_kernel_ipv6_enabled(){
+  local need=0
+  if [[ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null)" = "1" ]]; then
+    sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null 2>&1 && need=1
+  fi
+  if [[ "$(cat /proc/sys/net/ipv6/conf/default/disable_ipv6 2>/dev/null)" = "1" ]]; then
+    sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null 2>&1 && need=1
+  fi
+  if ((need)); then
+    mkdir -p /etc/sysctl.d
+    cat >/etc/sysctl.d/99-ipv6-enable.conf <<'SYS'
+net.ipv6.conf.all.disable_ipv6 = 0
+net.ipv6.conf.default.disable_ipv6 = 0
+SYS
+    sysctl --system >/dev/null 2>&1 || sysctl -p >/dev/null 2>&1 || true
+  fi
+}
+
+# Docker bridge 是否启用 IPv6
+bridge_v6_enabled(){ docker network inspect bridge 2>/dev/null | grep -q '"EnableIPv6": *true'; }
+
+# 自动开启 Docker IPv6（修改 /etc/docker/daemon.json 并重启）
+ensure_docker_ipv6_auto(){
+  command -v docker >/dev/null 2>&1 || return 0
+  bridge_v6_enabled && return 0
+
+  ensure_kernel_ipv6_enabled
+
+  local daemon=/etc/docker/daemon.json; mkdir -p /etc/docker
+  # 尝试准备 python3 以合并 JSON
+  if ! have_cmd python3; then
+    detect_os
+    case "$OS" in
+      ubuntu|debian) apt-get update -y && apt-get install -y python3 >/dev/null 2>&1 ;;
+      centos|rhel) yum install -y python3 >/dev/null 2>&1 ;;
+      rocky|almalinux|fedora) dnf install -y python3 >/dev/null 2>&1 ;;
+      opensuse*|sles) zypper install -y python3 >/dev/null 2>&1 ;;
+    esac
+  fi
+  local tmp; tmp="$(mktemp)"
+  python3 - "$daemon" >"$tmp" <<'PY'
+import json,sys,os
+path=sys.argv[1]
+data={}
+if os.path.exists(path):
+  try:
+    with open(path,'r') as f:
+      data=json.load(f)
+  except Exception:
+    pass
+if data.get('ipv6') is not True:
+  data['ipv6']=True
+if not data.get('fixed-cidr-v6'):
+  data['fixed-cidr-v6']='fd00:dead:beef::/48'
+with open(path,'w') as f:
+  json.dump(data,f,indent=2)
+PY
+  mv -f "$tmp" "$daemon"
+
+  if have_cmd systemctl; then systemctl restart docker; else service docker restart 2>/dev/null || service docker start 2>/dev/null; fi
+  for i in {1..10}; do docker info >/dev/null 2>&1 && break; sleep 1; done
+  bridge_v6_enabled || echo -e "${YELLOW}${INDENT}⚠️ Docker IPv6 仍未启用（可稍后手动检查 daemon.json）${NC}"
+}
 
 # ========== 状态检测 ==========
 check_ssr_status(){
@@ -166,10 +233,7 @@ ipv6_available() {
   [[ -f /proc/net/if_inet6 ]] && [[ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null)" != "1" ]]
 }
 # Docker bridge 是否启用 IPv6（避免 -p [::]:… 时报错）
-docker_bridge_ipv6_enabled() {
-  command -v docker >/dev/null 2>&1 || return 1
-  docker network inspect bridge 2>/dev/null | grep -q '"EnableIPv6": *true'
-}
+docker_bridge_ipv6_enabled() { bridge_v6_enabled; }
 # 过滤掉本地/链路本地/ULA 等非公网 v6
 is_public_v6() {
   local ip="${1,,}"
@@ -298,22 +362,17 @@ EOF
 
 # ========== 链接与配置展示（IPv4/IPv6） ==========
 generate_ssr_link() {
-  # 以容器实际配置为准，避免变量与实际不一致
   read_config_vars
-
-  # 收集公网 IPv4/IPv6
   local v4s=() v6s=()
   mapfile -t v4s < <(get_ipv4_list)
   mapfile -t v6s < <(get_ipv6_list)
 
-  # 组件编码（URL-safe）
   local pwd_b64url remarks_b64url group_b64url
   pwd_b64url="$(enc_b64url "$PASSWORD")"
   group_b64url="$(enc_b64url "SSR-Plus")"
 
   echo -e "\n${GREEN}${INDENT}SSR 链接（按需导入）：${NC}"
 
-  # IPv4 链接
   if ((${#v4s[@]})); then
     for ip4 in "${v4s[@]}"; do
       remarks_b64url="$(enc_b64url "SSR-Plus:[IPv4] ${ip4}:${PORT}")"
@@ -324,7 +383,6 @@ generate_ssr_link() {
     echo -e "${INDENT}- ${YELLOW}[IPv4] 未检测到公网 IPv4${NC}"
   fi
 
-  # IPv6 链接（推荐使用域名）
   if ((${#v6s[@]})); then
     if [[ -n "$SSRPLUS_IPV6_HOST" ]]; then
       local host="$SSRPLUS_IPV6_HOST"
@@ -347,10 +405,8 @@ show_config() {
   docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$" || { echo -e "${RED}${INDENT}未检测到 SSR 容器${NC}"; return; }
   docker exec "$CONTAINER_NAME" test -f "$CONFIG_PATH" || { echo -e "${YELLOW}${INDENT}容器内未找到配置文件${NC}"; return; }
 
-  # 用容器内的真实配置，避免变量不同步
   read_config_vars
 
-  # 展示 IPv4/IPv6 列表
   local v4_list v6_list
   v4_list=$(get_ipv4_list | paste -sd, -)
   v6_list=$(get_ipv6_list | head -n ${MAX_V6_TO_SHOW:-5} | paste -sd, -)
@@ -387,7 +443,6 @@ start_ssr_and_wait(){
 run_container_with_boot(){
   local map_port="$1"
 
-  # 构造端口映射：IPv4 始终发布；IPv6 仅在宿主和 Docker 都支持时发布
   local port_flags=( -p "${map_port}:${map_port}" )
   if ipv6_available && docker_bridge_ipv6_enabled; then
     port_flags+=( -p "[::]:${map_port}:${map_port}" )
@@ -395,13 +450,16 @@ run_container_with_boot(){
     [[ -n "$INDENT" ]] && echo -e "${YELLOW}${INDENT}提示：未检测到 Docker IPv6（或宿主未启用），跳过 IPv6 端口发布${NC}"
   fi
 
-  docker run -dit --name $CONTAINER_NAME \
+  # 用 ANSI-C 字面量安全注入换行，避免 heredoc 被破坏
+  local payload=$'cat >/usr/local/bin/ssr-boot.sh << "SH"\n#!/bin/bash\nCFG="/etc/shadowsocks-r/config.json"\n# 等待配置写入\nfor i in {1..60}; do [ -f "$CFG" ] && break; sleep 1; done\nsleep 2\npgrep -f server.py >/dev/null 2>&1 || python /usr/local/shadowsocks/server.py -c "$CFG" -d start\nwhile sleep 5; do\n  pgrep -f server.py >/dev/null 2>&1 || python /usr/local/shadowsocks/server.py -c "$CFG" -d start\n done\nSH\nchmod +x /usr/local/bin/ssr-boot.sh\nexec /usr/local/bin/ssr-boot.sh'
+
+  docker run -dit --name "$CONTAINER_NAME" \
     --restart unless-stopped \
-    ${port_flags[@]} \
+    "${port_flags[@]}" \
     --health-cmd "python -c 'import socket,sys; s=socket.socket(); s.settimeout(2); s.connect((\"127.0.0.1\",${map_port})); s.close()' || exit 1" \
     --health-interval 10s --health-retries 3 --health-timeout 3s --health-start-period 5s \
-    $DOCKER_IMAGE \
-    bash -lc 'cat >/usr/local/bin/ssr-boot.sh << "SH"\n#!/bin/bash\nCFG="/etc/shadowsocks-r/config.json"\n# 等待配置文件写入\nfor i in {1..60}; do [ -f "$CFG" ] && break; sleep 1; done\nsleep 2\npgrep -f server.py >/dev/null 2>&1 || python /usr/local/shadowsocks/server.py -c "$CFG" -d start\nwhile sleep 5; do\n  pgrep -f server.py >/dev/null 2>&1 || python /usr/local/shadowsocks/server.py -c "$CFG" -d start\ndone\nSH\nchmod +x /usr/local/bin/ssr-boot.sh\nexec /usr/local/bin/ssr-boot.sh'
+    "$DOCKER_IMAGE" \
+    bash -lc "$payload"
 }
 
 # ========== 功能 ==========
@@ -412,6 +470,7 @@ install_ssr(){
   choose_method; choose_protocol; choose_obfs
 
   install_docker; ensure_docker_running || { echo -e "${RED}${INDENT}Docker 未运行，安装中止${NC}"; return; }
+  ensure_docker_ipv6_auto   # << 自动开启 Docker IPv6
   docker pull $DOCKER_IMAGE
   docker stop $CONTAINER_NAME >/dev/null 2>&1; docker rm $CONTAINER_NAME >/dev/null 2>&1
 
@@ -436,6 +495,8 @@ change_config(){
   read -p "${INDENT}新密码 (回车保留: ${PASSWORD:-dongtaiwang.com}): " NEW_PASSWORD
   choose_method; choose_protocol; choose_obfs
   NEW_PORT=${NEW_PORT:-$PORT}; PASSWORD=${NEW_PASSWORD:-$PASSWORD}
+
+  ensure_docker_ipv6_auto   # << 自动开启 Docker IPv6
 
   if [ "$NEW_PORT" != "$PORT" ] && [ -n "$NEW_PORT" ]; then
     echo -e "${YELLOW}${INDENT}端口改变，重新创建容器...${NC}"
@@ -562,6 +623,7 @@ update_script() {
 # ========== 主菜单 ==========
 check_bbr
 ensure_docker_running >/dev/null 2>&1
+ensure_docker_ipv6_auto >/dev/null 2>&1
 check_ssr_status
 auto_heal_ssr
 check_ssr_status
